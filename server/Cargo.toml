@@ -8,3 +8,4 @@ bincode = {workspace = true}
 serde = {workspace = true, features = ["derive"]}
 rand = {workspace = true}
 chrono = {workspace = true}
+thiserror = "2"
