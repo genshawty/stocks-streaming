@@ -22,6 +22,9 @@ pub enum ProcessorError {
 
     #[error("Parsing error: {0}")]
     ParseErr(#[from] ParseCommandErr),
+
+    #[error("Generator error: {0}")]
+    GenErr(#[from] GeneratorError),
 }
 
 /// Errors that can occur when parsing subscription commands.

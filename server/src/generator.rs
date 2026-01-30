@@ -192,60 +192,37 @@ impl QuoteGenerator {
         }
     }
 
-    /// Subscribes receiver to ticker. Creates receiver entry if new, otherwise adds ticker to existing subscriptions.
-    pub(crate) fn add_reciever(&mut self, id: u64, sender: Sender<StockQuote>, ticker: &str) {
+    /// Subscribes receiver to multiple tickers. Creates receiver entry if new, otherwise adds tickers to existing subscriptions.
+    pub(crate) fn add_reciever(&mut self, id: u64, sender: Sender<StockQuote>, tickers: Vec<String>) {
+        let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
+
         // 1. Add receiver if not exists, or update their subscribed tickers
         self.recievers
             .write()
             .unwrap()
             .entry(id)
             .and_modify(|info| {
-                info.subscribed_tickers.insert(ticker.to_owned());
+                info.subscribed_tickers.extend(tickers_set.clone());
             })
             .or_insert(RecieverInfo {
                 id,
                 channel: sender,
-                subscribed_tickers: HashSet::from([ticker.to_owned()]),
+                subscribed_tickers: tickers_set,
             });
 
-        // 2. Add receiver ID to ticker's subscription list
-        self.tickers_to_recievers
-            .write()
-            .unwrap()
-            .entry(ticker.to_owned())
-            .or_insert(Vec::new())
-            .push(id);
-    }
-
-    /// Unsubscribes receiver from ticker. Removes receiver entirely if no subscriptions remain.
-    pub(crate) fn remove_reciever(&mut self, id: u64, ticker: &str) {
-        // 1. Remove ticker from receiver's subscription list
-        let mut recvs = self.recievers.write().unwrap();
-        if let Some(info) = recvs.get_mut(&id) {
-            info.subscribed_tickers.remove(ticker);
-
-            // If receiver has no more subscriptions, remove them completely
-            if info.subscribed_tickers.is_empty() {
-                recvs.remove(&id);
-            }
+        // 2. Add receiver ID to each ticker's subscription list
+        let mut ticker_subs = self.tickers_to_recievers.write().unwrap();
+        for ticker in tickers {
+            ticker_subs
+                .entry(ticker)
+                .or_insert(Vec::new())
+                .push(id);
         }
-        drop(recvs); // Release lock
-
-        // 2. Remove receiver ID from ticker's list
-        self.tickers_to_recievers
-            .write()
-            .unwrap()
-            .entry(ticker.to_owned())
-            .and_modify(|ids| {
-                if let Some(pos) = ids.iter().position(|&x| x == id) {
-                    ids.remove(pos);
-                }
-            });
     }
 
     /// Unsubscribes receiver from all tickers and removes from registry.
-    pub(crate) fn remove_reciever_all(&mut self, id: u64) {
-        // Get all tickers this receiver is subscribed to
+    pub(crate) fn remove_reciever(&mut self, id: u64) {
+        // 1. Get all tickers this receiver is subscribed to
         let tickers: Vec<String> = self.recievers
             .read()
             .unwrap()
@@ -253,9 +230,17 @@ impl QuoteGenerator {
             .map(|info| info.subscribed_tickers.iter().cloned().collect())
             .unwrap_or_default();
 
-        // Remove from all ticker lists
+        // 2. Remove receiver from registry
+        self.recievers.write().unwrap().remove(&id);
+
+        // 3. Remove receiver ID from all ticker lists
+        let mut ticker_subs = self.tickers_to_recievers.write().unwrap();
         for ticker in tickers {
-            self.remove_reciever(id, &ticker);
+            if let Some(ids) = ticker_subs.get_mut(&ticker) {
+                if let Some(pos) = ids.iter().position(|&x| x == id) {
+                    ids.remove(pos);
+                }
+            }
         }
     }
 }
@@ -404,7 +389,7 @@ mod tests {
     fn add_reciever_creates_subscription() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _rx) = mpsc::channel();
-        qg.add_reciever(1, tx, "AAPL");
+        qg.add_reciever(1, tx, vec!["AAPL".to_string()]);
 
         // Check receiver was added
         let recvs = qg.recievers.read().unwrap();
@@ -423,8 +408,8 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_reciever(1, tx1, "AAPL");
-        qg.add_reciever(2, tx2, "AAPL");
+        qg.add_reciever(1, tx1, vec!["AAPL".to_string()]);
+        qg.add_reciever(2, tx2, vec!["AAPL".to_string()]);
 
         // Check both receivers exist
         let recvs = qg.recievers.read().unwrap();
@@ -442,11 +427,11 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_reciever(1, tx1, "AAPL");
-        qg.add_reciever(2, tx2, "AAPL");
-        qg.remove_reciever(1, "AAPL");
+        qg.add_reciever(1, tx1, vec!["AAPL".to_string()]);
+        qg.add_reciever(2, tx2, vec!["AAPL".to_string()]);
+        qg.remove_reciever(1);
 
-        // Receiver 1 should be removed (had only AAPL)
+        // Receiver 1 should be removed
         let recvs = qg.recievers.read().unwrap();
         assert!(!recvs.contains_key(&1));
         assert!(recvs.contains_key(&2));
@@ -462,8 +447,8 @@ mod tests {
     fn remove_reciever_nonexistent_id_does_nothing() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
-        qg.add_reciever(1, tx, "AAPL");
-        qg.remove_reciever(999, "AAPL");
+        qg.add_reciever(1, tx, vec!["AAPL".to_string()]);
+        qg.remove_reciever(999);
 
         // Receiver 1 should still exist
         let recvs = qg.recievers.read().unwrap();
@@ -480,20 +465,8 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
 
-        // Manually setup receiver with multiple tickers
-        {
-            let mut recvs = qg.recievers.write().unwrap();
-            recvs.insert(1, RecieverInfo {
-                id: 1,
-                channel: tx,
-                subscribed_tickers: HashSet::from(["AAPL".to_string(), "MSFT".to_string()]),
-            });
-        }
-        {
-            let mut ticker_subs = qg.tickers_to_recievers.write().unwrap();
-            ticker_subs.get_mut("AAPL").unwrap().push(1);
-            ticker_subs.get_mut("MSFT").unwrap().push(1);
-        }
+        // Use add_reciever with multiple tickers
+        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
 
         // Receiver should exist with both tickers
         let recvs = qg.recievers.read().unwrap();
@@ -509,62 +482,34 @@ mod tests {
     }
 
     #[test]
-    fn remove_reciever_partial_keeps_other_subscriptions() {
+    fn remove_reciever_removes_from_all_subscriptions() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
 
-        // Setup receiver with both tickers
-        {
-            let mut recvs = qg.recievers.write().unwrap();
-            recvs.insert(1, RecieverInfo {
-                id: 1,
-                channel: tx,
-                subscribed_tickers: HashSet::from(["AAPL".to_string(), "MSFT".to_string()]),
-            });
-        }
-        {
-            let mut ticker_subs = qg.tickers_to_recievers.write().unwrap();
-            ticker_subs.get_mut("AAPL").unwrap().push(1);
-            ticker_subs.get_mut("MSFT").unwrap().push(1);
-        }
+        // Add receiver with both tickers
+        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
 
-        qg.remove_reciever(1, "AAPL");
+        qg.remove_reciever(1);
 
-        // Receiver should still exist with only MSFT
+        // Receiver should be completely removed
         let recvs = qg.recievers.read().unwrap();
-        assert!(recvs.contains_key(&1));
-        let recv = recvs.get(&1).unwrap();
-        assert!(!recv.subscribed_tickers.contains("AAPL"));
-        assert!(recv.subscribed_tickers.contains("MSFT"));
+        assert!(!recvs.contains_key(&1));
 
-        // AAPL should not have this receiver, MSFT should
+        // Neither ticker should have this receiver
         let ticker_subs = qg.tickers_to_recievers.read().unwrap();
         assert!(!ticker_subs.get("AAPL").unwrap().contains(&1));
-        assert!(ticker_subs.get("MSFT").unwrap().contains(&1));
+        assert!(!ticker_subs.get("MSFT").unwrap().contains(&1));
     }
 
     #[test]
-    fn remove_reciever_all_removes_from_all_tickers() {
+    fn remove_reciever_removes_from_multiple_tickers() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
 
-        // Setup receiver with all three tickers
-        {
-            let mut recvs = qg.recievers.write().unwrap();
-            recvs.insert(1, RecieverInfo {
-                id: 1,
-                channel: tx,
-                subscribed_tickers: HashSet::from(["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()]),
-            });
-        }
-        {
-            let mut ticker_subs = qg.tickers_to_recievers.write().unwrap();
-            ticker_subs.get_mut("AAPL").unwrap().push(1);
-            ticker_subs.get_mut("MSFT").unwrap().push(1);
-            ticker_subs.get_mut("TSLA").unwrap().push(1);
-        }
+        // Add receiver with all three tickers
+        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()]);
 
-        qg.remove_reciever_all(1);
+        qg.remove_reciever(1);
 
         // Receiver should be completely removed
         let recvs = qg.recievers.read().unwrap();

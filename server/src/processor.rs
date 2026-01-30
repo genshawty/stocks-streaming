@@ -1,26 +1,61 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::ops::Sub;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
-use std::thread;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::errors::ProcessorError;
-use crate::types::SubscribeCommand;
+use crate::generator::{self, QuoteGenerator};
+use crate::types::{StockQuote, SubscribeCommand};
 
 const HEADER_LEN: usize = 4;
 
+/// Handle to a subscriber's streaming thread.
+struct SubscriberHandle {
+    id: u64,
+    thread_handle: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    tickers: Vec<String>,
+}
+
+/// Information passed to streaming thread.
+struct SubscriberInfo {
+    id: u64,
+    channel: Receiver<StockQuote>,
+    tickers: Vec<String>,
+    udp_addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+}
+
 pub(crate) struct Processor {
     port: u16,
-
+    generator: Arc<Mutex<QuoteGenerator>>,
+    subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
+    next_id: Arc<AtomicU64>,
     shutdown: Arc<RwLock<bool>>,
 }
 
 impl Processor {
-    pub(crate) fn start() {}
-    fn start_tcp_server(&self) -> Result<(), ProcessorError> {
+    /// Creates a new Processor with the specified port and tickers file.
+    pub(crate) fn new(port: u16, tickers_file: std::path::PathBuf) -> Result<Self, ProcessorError> {
+        // Load generator from tickers file
+        let generator = QuoteGenerator::new_from_file(tickers_file)?;
+
+        Ok(Self {
+            port,
+            generator: Arc::new(Mutex::new(generator)),
+            subscribers: Arc::new(RwLock::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(0)),
+            shutdown: Arc::new(RwLock::new(false)),
+        })
+    }
+
+    pub(crate) fn start_tcp_server(&self) -> Result<(), ProcessorError> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))?;
         println!("TCP server started on port {}", self.port);
         listener.set_nonblocking(true)?;
@@ -34,9 +69,14 @@ impl Processor {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New worker connected: {}", addr);
+                    let gen_clone = self.generator.clone();
+                    let subscribers_clone = self.subscribers.clone();
+                    let next_clone = self.next_id.clone();
 
                     thread::spawn(move || {
-                        if let Err(e) = Self::handle_request(stream) {
+                        if let Err(e) =
+                            Self::handle_request(stream, gen_clone, subscribers_clone, next_clone)
+                        {
                             eprintln!("Worker handler error: {}", e);
                         }
                     });
@@ -51,7 +91,12 @@ impl Processor {
         Ok(())
     }
 
-    fn handle_request(mut stream: TcpStream) -> Result<(), ProcessorError> {
+    fn handle_request(
+        mut stream: TcpStream,
+        generator: Arc<Mutex<QuoteGenerator>>,
+        subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
+        next_id: Arc<AtomicU64>,
+    ) -> Result<(), ProcessorError> {
         loop {
             let mut len_buf = [0u8; HEADER_LEN];
             match stream.read_exact(&mut len_buf) {
@@ -64,7 +109,12 @@ impl Processor {
                                 std::str::from_utf8(&data)
                                     .map_err(|e| ProcessorError::ParseErr(e.into()))?,
                             )?;
-                            // todo
+                            let _ = Processor::add_subscriber(
+                                cmd,
+                                generator.clone(),
+                                subscribers.clone(),
+                                next_id.clone(),
+                            );
                         }
                         Err(e) => {
                             // todo
@@ -79,5 +129,149 @@ impl Processor {
             }
         }
         Ok(())
+    }
+
+    /// Adds a new subscriber and starts streaming thread.
+    fn add_subscriber(
+        cmd: SubscribeCommand,
+        generator: Arc<Mutex<QuoteGenerator>>,
+        subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
+        next_id: Arc<AtomicU64>,
+    ) -> u64 {
+        // 1. Generate unique ID
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
+
+        // 2. Create shutdown signal (shared between handle and thread)
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // 3. Create channel for receiving quotes from generator
+        let (tx, rx) = mpsc::channel();
+
+        // 4. Register with generator for all tickers
+        {
+            let mut generator_lock = generator.lock().unwrap();
+            generator_lock.add_reciever(id, tx.clone(), cmd.tickers_list.clone());
+        }
+
+        // 5. Create subscriber info for streaming thread
+        let sub_info = SubscriberInfo {
+            id,
+            channel: rx,
+            tickers: cmd.tickers_list.clone(),
+            udp_addr: SocketAddr::new(cmd.ip.into(), cmd.port),
+            shutdown: Arc::clone(&shutdown),
+        };
+
+        // 6. Spawn streaming thread
+        let handle = thread::spawn(move || {
+            Self::start_streaming(sub_info);
+        });
+
+        // 7. Store handle
+        subscribers.write().unwrap().insert(
+            id,
+            SubscriberHandle {
+                id,
+                thread_handle: handle,
+                shutdown: Arc::clone(&shutdown),
+                tickers: cmd.tickers_list.clone(),
+            },
+        );
+
+        println!(
+            "Added subscriber {} for tickers: {:?}",
+            id, cmd.tickers_list
+        );
+        id
+    }
+
+    /// Removes subscriber and cleans up resources.
+    fn remove_subscriber(&self, id: u64) {
+        // 1. Remove from subscribers map
+        let handle = self.subscribers.write().unwrap().remove(&id);
+
+        if let Some(handle) = handle {
+            println!("Removing subscriber {}", id);
+
+            // 2. Signal shutdown
+            handle.shutdown.store(true, Ordering::Relaxed);
+
+            // 3. Remove from generator
+            let mut generator_lock = self.generator.lock().unwrap();
+            generator_lock.remove_reciever(id);
+            drop(generator_lock);
+
+            // 4. Wait for thread to finish
+            if let Err(e) = handle.thread_handle.join() {
+                eprintln!("Error joining subscriber {} thread: {:?}", id, e);
+            }
+
+            println!("Subscriber {} removed", id);
+        }
+    }
+
+    /// Streaming loop that receives quotes and sends via UDP.
+    fn start_streaming(info: SubscriberInfo) {
+        // Create UDP socket for this subscriber
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "Failed to create UDP socket for subscriber {}: {}",
+                    info.id, e
+                );
+                return;
+            }
+        };
+
+        println!(
+            "Started streaming for subscriber {} to {}",
+            info.id, info.udp_addr
+        );
+
+        loop {
+            // Check shutdown signal
+            if info.shutdown.load(Ordering::Relaxed) {
+                println!("Subscriber {} received shutdown signal", info.id);
+                break;
+            }
+
+            // Receive quote with timeout (non-blocking)
+            match info.channel.recv_timeout(Duration::from_millis(100)) {
+                Ok(quote) => {
+                    // Serialize quote to bytes
+                    match quote.to_bytes() {
+                        Ok(bytes) => {
+                            // Send via UDP
+                            let data_len = bytes.len().to_be_bytes();
+                            if let Err(e) = socket.send_to(&data_len, info.udp_addr) {
+                                eprintln!("UDP send failed for subscriber {}: {}", info.id, e);
+                                // todo
+                                if let Err(e) = socket.send_to(&bytes, info.udp_addr) {
+                                    eprintln!("UDP send failed for subscriber {}: {}", info.id, e);
+                                    // todo
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to serialize quote for subscriber {}: {}",
+                                info.id, e
+                            );
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // No quote received, continue
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    println!("Channel disconnected for subscriber {}", info.id);
+                    break;
+                }
+            }
+        }
+
+        println!("Streaming ended for subscriber {}", info.id);
     }
 }
