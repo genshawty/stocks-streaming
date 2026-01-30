@@ -60,7 +60,7 @@ impl StockQuote {
 }
 
 /// Available commands for client requests.
-#[derive(Debug, PartialEq, EnumString, strum_macros::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumString, strum_macros::Display)]
 pub enum Commands {
     /// Request to stream stock quotes
     #[strum(ascii_case_insensitive, to_string = "STREAM")]
@@ -68,7 +68,7 @@ pub enum Commands {
 }
 
 /// Network protocols supported for streaming.
-#[derive(Debug, PartialEq, EnumString, strum_macros::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumString, strum_macros::Display)]
 pub enum Protocol {
     /// User Datagram Protocol
     #[strum(ascii_case_insensitive, to_string = "UDP")]
@@ -125,9 +125,9 @@ impl fmt::Display for SubscribeCommand {
             "{}|{}|{}|{}|{}",
             self.cmd,
             self.protocol,
-            self.ip,
+            self.ip.clone(),
             self.port,
-            self.tickers_list.join(",")
+            self.tickers_list.clone().join(",")
         )
     }
 }
@@ -210,10 +210,7 @@ mod tests {
     fn test_subscribe_command_not_enough_args() {
         let input = "STREAM|UDP|192.168.1.1";
         let result = SubscribeCommand::from_str(input);
-        assert!(matches!(
-            result,
-            Err(ParseCommandErr::NotEnoughArguments)
-        ));
+        assert!(matches!(result, Err(ParseCommandErr::NotEnoughArguments)));
     }
 
     #[test]

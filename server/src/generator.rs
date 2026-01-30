@@ -26,7 +26,7 @@ const BASE_DELAY: u64 = 1000;
 const MAX_START_PRICE: f64 = 100.0;
 
 /// Receiver with channel and subscribed tickers.
-struct RecieverInfo {
+pub(crate) struct RecieverInfo {
     id: u64,
     channel: mpsc::Sender<StockQuote>,
     subscribed_tickers: HashSet<String>,
@@ -53,7 +53,7 @@ fn generate_initial_price() -> f64 {
 }
 
 /// Current price and last update timestamp for a ticker.
-struct PriceChange {
+pub(crate) struct PriceChange {
     price: f64,
     last_change: u64,
 }
@@ -107,19 +107,28 @@ impl QuoteGenerator {
         Ok(QuoteGenerator::new(tickers))
     }
 
-    /// Spawns a thread for each ticker to generate and distribute quotes. Blocks forever.
-    pub(crate) fn start(&self) {
-        let tickers: Vec<_> = self.prices.read().unwrap().keys().cloned().collect();
-        thread::scope(|scope| {
-            for ticker in tickers {
-                let prices = Arc::clone(&self.prices);
-                let receivers = Arc::clone(&self.recievers);
-                let tickers_to_recievers = Arc::clone(&self.tickers_to_recievers);
-                scope.spawn(move || {
-                    Self::start_for_quote(&prices, &receivers, &tickers_to_recievers, &ticker, BASE_DELAY);
-                });
-            }
-        })
+    /// Spawns a thread for each ticker to generate and distribute quotes.
+    /// Takes Arc parameters to avoid holding mutex lock during execution.
+    pub(crate) fn start(
+        prices: Arc<RwLock<HashMap<String, PriceChange>>>,
+        receivers: Arc<RwLock<HashMap<u64, RecieverInfo>>>,
+        tickers_to_recievers: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    ) {
+        let tickers: Vec<_> = prices.read().unwrap().keys().cloned().collect();
+        for ticker in tickers {
+            let prices_clone = Arc::clone(&prices);
+            let receivers_clone = Arc::clone(&receivers);
+            let tickers_to_recievers_clone = Arc::clone(&tickers_to_recievers);
+            thread::spawn(move || {
+                Self::start_for_quote(
+                    &prices_clone,
+                    &receivers_clone,
+                    &tickers_to_recievers_clone,
+                    &ticker,
+                    BASE_DELAY,
+                );
+            });
+        }
     }
 
     /// Generates new quote for ticker with updated price and random volume.
@@ -182,7 +191,10 @@ impl QuoteGenerator {
                         if let Some(receiver_info) = recv_guard.get(receiver_id) {
                             if receiver_info.channel.send(quote.clone()).is_err() {
                                 // Channel closed - receiver disconnected
-                                println!("Error sending quote to receiver {}: channel closed", receiver_id);
+                                println!(
+                                    "Error sending quote to receiver {}: channel closed",
+                                    receiver_id
+                                );
                             }
                         }
                     }
@@ -193,7 +205,12 @@ impl QuoteGenerator {
     }
 
     /// Subscribes receiver to multiple tickers. Creates receiver entry if new, otherwise adds tickers to existing subscriptions.
-    pub(crate) fn add_reciever(&mut self, id: u64, sender: Sender<StockQuote>, tickers: Vec<String>) {
+    pub(crate) fn add_reciever(
+        &mut self,
+        id: u64,
+        sender: Sender<StockQuote>,
+        tickers: Vec<String>,
+    ) {
         let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
 
         // 1. Add receiver if not exists, or update their subscribed tickers
@@ -213,17 +230,15 @@ impl QuoteGenerator {
         // 2. Add receiver ID to each ticker's subscription list
         let mut ticker_subs = self.tickers_to_recievers.write().unwrap();
         for ticker in tickers {
-            ticker_subs
-                .entry(ticker)
-                .or_insert(Vec::new())
-                .push(id);
+            ticker_subs.entry(ticker).or_insert(Vec::new()).push(id);
         }
     }
 
     /// Unsubscribes receiver from all tickers and removes from registry.
     pub(crate) fn remove_reciever(&mut self, id: u64) {
         // 1. Get all tickers this receiver is subscribed to
-        let tickers: Vec<String> = self.recievers
+        let tickers: Vec<String> = self
+            .recievers
             .read()
             .unwrap()
             .get(&id)
@@ -503,11 +518,17 @@ mod tests {
 
     #[test]
     fn remove_reciever_removes_from_multiple_tickers() {
-        let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()].into_iter());
+        let mut qg = QuoteGenerator::new(
+            vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()].into_iter(),
+        );
         let (tx, _) = mpsc::channel();
 
         // Add receiver with all three tickers
-        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()]);
+        qg.add_reciever(
+            1,
+            tx,
+            vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()],
+        );
 
         qg.remove_reciever(1);
 
@@ -532,11 +553,14 @@ mod tests {
         // Manually insert receiver using new structure
         {
             let mut recvs = qg.recievers.write().unwrap();
-            recvs.insert(1, RecieverInfo {
-                id: 1,
-                channel: tx,
-                subscribed_tickers: HashSet::from(["AAPL".to_string()]),
-            });
+            recvs.insert(
+                1,
+                RecieverInfo {
+                    id: 1,
+                    channel: tx,
+                    subscribed_tickers: HashSet::from(["AAPL".to_string()]),
+                },
+            );
         }
         {
             let mut ticker_subs = qg.tickers_to_recievers.write().unwrap();

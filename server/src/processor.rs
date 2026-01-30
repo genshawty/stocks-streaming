@@ -13,8 +13,6 @@ use crate::errors::ProcessorError;
 use crate::generator::{self, QuoteGenerator};
 use crate::types::{StockQuote, SubscribeCommand};
 
-const HEADER_LEN: usize = 4;
-
 /// Handle to a subscriber's streaming thread.
 struct SubscriberHandle {
     id: u64,
@@ -60,6 +58,19 @@ impl Processor {
         println!("TCP server started on port {}", self.port);
         listener.set_nonblocking(true)?;
 
+        // Clone Arc parameters without holding the mutex lock
+        let (prices, receivers, tickers_to_recievers) = {
+            let generator_guard = self.generator.lock().unwrap();
+            (
+                Arc::clone(&generator_guard.prices),
+                Arc::clone(&generator_guard.recievers),
+                Arc::clone(&generator_guard.tickers_to_recievers),
+            )
+        }; // Lock is released here
+
+        // Start generator threads
+        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_recievers));
+
         loop {
             if *self.shutdown.read().unwrap() {
                 println!("TCP server shutting down");
@@ -97,8 +108,9 @@ impl Processor {
         subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
         next_id: Arc<AtomicU64>,
     ) -> Result<(), ProcessorError> {
+        // Get client's actual IP address from TCP connection
         loop {
-            let mut len_buf = [0u8; HEADER_LEN];
+            let mut len_buf = [0u8; 4];
             match stream.read_exact(&mut len_buf) {
                 Ok(()) => {
                     let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -115,16 +127,22 @@ impl Processor {
                                 subscribers.clone(),
                                 next_id.clone(),
                             );
+                            break;
                         }
                         Err(e) => {
-                            // todo
-                            eprint!("error reading data: {}", e)
+                            println!("Error reading data: {}. Client disconnected.", e);
+                            break;
                         }
                     }
                 }
                 Err(e) => {
-                    // todo
-                    eprint!("error reading header: {}", e)
+                    // Connection closed or error - break out of loop
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        println!("Client disconnected");
+                    } else {
+                        println!("Error reading header: {}", e);
+                    }
+                    break;
                 }
             }
         }
@@ -242,15 +260,15 @@ impl Processor {
                     // Serialize quote to bytes
                     match quote.to_bytes() {
                         Ok(bytes) => {
-                            // Send via UDP
-                            let data_len = bytes.len().to_be_bytes();
-                            if let Err(e) = socket.send_to(&data_len, info.udp_addr) {
+                            // Combine header and data into single UDP packet
+                            let data_len = (bytes.len() as u32).to_be_bytes();
+                            let mut packet = Vec::with_capacity(4 + bytes.len());
+                            packet.extend_from_slice(&data_len);
+                            packet.extend_from_slice(&bytes);
+
+                            // Send as single UDP datagram
+                            if let Err(e) = socket.send_to(&packet, info.udp_addr) {
                                 eprintln!("UDP send failed for subscriber {}: {}", info.id, e);
-                                // todo
-                                if let Err(e) = socket.send_to(&bytes, info.udp_addr) {
-                                    eprintln!("UDP send failed for subscriber {}: {}", info.id, e);
-                                    // todo
-                                }
                             }
                         }
                         Err(e) => {
