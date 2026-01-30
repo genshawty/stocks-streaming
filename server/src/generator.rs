@@ -25,31 +25,14 @@ const BASE_DELAY: u64 = 1000;
 /// Maximum starting price for randomly initialized tickers
 const MAX_START_PRICE: f64 = 100.0;
 
-/// Information about a receiver that subscribes to stock quotes.
-///
-/// Each receiver has a unique ID, a channel for sending quotes, and tracks
-/// which tickers they are subscribed to. This allows efficient management
-/// of subscriptions where one receiver can subscribe to multiple tickers
-/// using a single channel.
+/// Receiver with channel and subscribed tickers.
 struct RecieverInfo {
-    /// Unique identifier for this receiver
     id: u64,
-    /// Channel used to send StockQuote updates to this receiver
     channel: mpsc::Sender<StockQuote>,
-    /// Set of ticker symbols this receiver is subscribed to
     subscribed_tickers: HashSet<String>,
 }
 
-/// Generates a new price using random walk algorithm.
-///
-/// Changes are proportional to the current price and bounded to prevent negative values.
-/// The price change follows a random walk with a maximum change of ±2% per tick.
-///
-/// # Arguments
-/// * `previous_price` - The current price to base the new price on
-///
-/// # Returns
-/// A new price that differs from the previous by at most ±2%, never below MIN_PRICE
+/// Generates new price using random walk (±2% change, minimum MIN_PRICE).
 fn generate_new_price(previous_price: f64) -> f64 {
     let mut rng = rand::rng();
 
@@ -63,106 +46,35 @@ fn generate_new_price(previous_price: f64) -> f64 {
     new_price.max(MIN_PRICE)
 }
 
-/// Generates a random initial price for a new ticker.
-///
-/// # Returns
-/// A random price between MIN_PRICE and MAX_START_PRICE
+/// Generates random initial price between MIN_PRICE and MAX_START_PRICE.
 fn generate_initial_price() -> f64 {
     let mut rng = rand::rng();
     rng.random_range(MIN_PRICE..MAX_START_PRICE)
 }
 
-/// Tracks the current price and metadata for a specific ticker.
-///
-/// This structure maintains the current price and timestamp of the last change,
-/// which can be used for calculating dynamic update intervals in the future.
+/// Current price and last update timestamp for a ticker.
 struct PriceChange {
-    /// Current price of the ticker
     price: f64,
-    /// Unix timestamp (milliseconds) of the last price update
     last_change: u64,
 }
 
-/// Stock quote generator that manages price updates and distributes them to subscribers.
+/// Quote generator managing price updates and distribution to subscribers.
 ///
-/// # Architecture
+/// Uses three maps for efficient management:
+/// - `prices`: ticker -> current price/timestamp
+/// - `recievers`: receiver_id -> channel + subscribed tickers
+/// - `tickers_to_recievers`: ticker -> [receiver_ids]
 ///
-/// The generator uses three key data structures to efficiently manage quote generation
-/// and distribution:
-///
-/// ## 1. `prices` - Price Tracking
-/// Maps ticker symbols to their current price and metadata:
-/// ```text
-/// "AAPL" -> PriceChange { price: 150.25, last_change: 1234567890 }
-/// "MSFT" -> PriceChange { price: 380.50, last_change: 1234567891 }
-/// ```
-/// Each ticker runs in its own thread, continuously generating new prices using a
-/// random walk algorithm and updating this map.
-///
-/// ## 2. `recievers` - Receiver Registry
-/// Maps receiver IDs to their channel and subscription information:
-/// ```text
-/// 1 -> RecieverInfo {
-///     id: 1,
-///     channel: Sender<StockQuote>,
-///     subscribed_tickers: {"AAPL", "MSFT", "GOOGL"}
-/// }
-/// 2 -> RecieverInfo {
-///     id: 2,
-///     channel: Sender<StockQuote>,
-///     subscribed_tickers: {"TSLA"}
-/// }
-/// ```
-/// This design allows each receiver to have ONE channel that receives quotes for
-/// ALL their subscribed tickers, reducing memory usage and complexity.
-///
-/// ## 3. `tickers_to_recievers` - Distribution Index
-/// Maps ticker symbols to lists of receiver IDs subscribed to them:
-/// ```text
-/// "AAPL" -> [1, 3, 5]
-/// "MSFT" -> [1, 2]
-/// "TSLA" -> [2, 4]
-/// ```
-/// When a new quote is generated for a ticker, this map allows quick lookup of
-/// which receivers need to be notified. The quote is then sent to each receiver's
-/// channel (found in `recievers`).
-///
-/// ## Quote Flow
-/// 1. Each ticker has a dedicated thread that generates quotes periodically
-/// 2. New quote is generated using `generate_quote()` and stored in `prices`
-/// 3. `tickers_to_recievers` is consulted to find subscribed receivers
-/// 4. For each receiver ID, their channel is retrieved from `recievers`
-/// 5. Quote is sent through the channel to the receiver
-///
-/// ## Thread Safety
-/// All data structures use `Arc<RwLock<>>` for safe concurrent access across
-/// multiple ticker threads and the main thread handling subscriptions.
+/// Each ticker runs in its own thread generating quotes. When a quote is generated,
+/// it looks up subscribed receivers and sends via their channels.
 pub(crate) struct QuoteGenerator {
-    /// Current prices for all tracked tickers
     pub(crate) prices: Arc<RwLock<HashMap<String, PriceChange>>>,
-    /// Registry of all receivers with their channels and subscriptions
     pub(crate) recievers: Arc<RwLock<HashMap<u64, RecieverInfo>>>,
-    /// Index mapping tickers to their subscribed receiver IDs
     pub(crate) tickers_to_recievers: Arc<RwLock<HashMap<String, Vec<u64>>>>,
 }
 
 impl QuoteGenerator {
-    /// Creates a new QuoteGenerator with the specified tickers.
-    ///
-    /// Each ticker is initialized with a random starting price. No receivers
-    /// are subscribed initially - use `add_reciever()` to add subscriptions.
-    ///
-    /// # Arguments
-    /// * `tickers` - An iterator of ticker symbols (e.g., "AAPL", "MSFT")
-    ///
-    /// # Returns
-    /// A new QuoteGenerator instance ready to start generating quotes
-    ///
-    /// # Example
-    /// ```ignore
-    /// let tickers = vec!["AAPL".to_string(), "GOOGL".to_string()];
-    /// let generator = QuoteGenerator::new(tickers.into_iter());
-    /// ```
+    /// Creates QuoteGenerator with specified tickers initialized at random prices.
     pub(crate) fn new<T>(tickers: T) -> Self
     where
         T: Iterator<Item = String>,
@@ -187,21 +99,7 @@ impl QuoteGenerator {
         }
     }
 
-    /// Creates a new QuoteGenerator by loading ticker symbols from a file.
-    ///
-    /// Each line in the file should contain one ticker symbol. Whitespace is trimmed.
-    ///
-    /// # Arguments
-    /// * `input` - Path to the file containing ticker symbols
-    ///
-    /// # Returns
-    /// * `Ok(QuoteGenerator)` - Successfully loaded tickers
-    /// * `Err(GeneratorError)` - Failed to read the file
-    ///
-    /// # Example
-    /// ```ignore
-    /// let generator = QuoteGenerator::new_from_file(PathBuf::from("tickers.txt"))?;
-    /// ```
+    /// Loads tickers from file (one per line, whitespace trimmed).
     pub(crate) fn new_from_file(input: PathBuf) -> Result<Self, GeneratorError> {
         let file = std::fs::File::open(input)?;
         let reader = BufReader::new(file);
@@ -209,23 +107,7 @@ impl QuoteGenerator {
         Ok(QuoteGenerator::new(tickers))
     }
 
-    /// Starts the quote generator for all tickers.
-    ///
-    /// Spawns a separate thread for each ticker that continuously generates new quotes
-    /// at the specified delay interval. This method blocks until all ticker threads
-    /// complete (which is never, unless the thread scope is dropped).
-    ///
-    /// New receivers can be added using `add_reciever()` while the generator is running.
-    /// The quote generation threads will automatically pick up new subscriptions.
-    ///
-    /// # Thread Model
-    /// Each ticker gets its own thread that:
-    /// 1. Generates a new price using random walk
-    /// 2. Updates the `prices` map
-    /// 3. Looks up subscribed receivers in `tickers_to_recievers`
-    /// 4. Sends the quote to each receiver's channel
-    /// 5. Sleeps for the delay period
-    /// 6. Repeats
+    /// Spawns a thread for each ticker to generate and distribute quotes. Blocks forever.
     pub(crate) fn start(&self) {
         let tickers: Vec<_> = self.prices.read().unwrap().keys().cloned().collect();
         thread::scope(|scope| {
@@ -240,25 +122,8 @@ impl QuoteGenerator {
         })
     }
 
-    /// Generates a new quote for a specific ticker and updates the stored price.
-    ///
-    /// This function:
-    /// 1. Reads the current price from the `prices` map
-    /// 2. Generates a new price using random walk algorithm
-    /// 3. Updates the stored price and timestamp
-    /// 4. Creates a StockQuote with random volume
-    ///
-    /// # Arguments
-    /// * `prices` - Shared reference to the prices map
-    /// * `ticker` - The ticker symbol to generate a quote for
-    ///
-    /// # Returns
-    /// * `Some(StockQuote)` - A new quote with updated price
-    /// * `None` - If the ticker doesn't exist in the prices map
-    ///
-    /// # Volume Generation
-    /// Popular stocks (AAPL, MSFT, TSLA) get higher volume (1000-6000),
-    /// while others get lower volume (100-1100).
+    /// Generates new quote for ticker with updated price and random volume.
+    /// Returns None if ticker doesn't exist.
     fn generate_quote(
         prices: &Arc<RwLock<HashMap<String, PriceChange>>>,
         ticker: &str,
@@ -299,30 +164,7 @@ impl QuoteGenerator {
         })
     }
 
-    /// Continuously generates and distributes quotes for a specific ticker.
-    ///
-    /// This is the main loop for each ticker thread. It runs forever, generating
-    /// new quotes at regular intervals and distributing them to all subscribed receivers.
-    ///
-    /// # Arguments
-    /// * `prices` - Shared prices map for reading/updating prices
-    /// * `recievers` - Shared receiver registry for looking up channels
-    /// * `tickers_to_recievers` - Shared index of ticker→receiver mappings
-    /// * `ticker` - The ticker symbol this thread is responsible for
-    /// * `delay` - Milliseconds to wait between quote generations
-    ///
-    /// # Distribution Flow
-    /// 1. Generate new quote using `generate_quote()`
-    /// 2. Acquire read locks on both maps
-    /// 3. Look up receiver IDs from `tickers_to_recievers[ticker]`
-    /// 4. For each receiver ID, get their channel from `recievers[id]`
-    /// 5. Send quote through channel (errors are logged but don't stop the loop)
-    /// 6. Sleep for the specified delay
-    /// 7. Repeat
-    ///
-    /// # Error Handling
-    /// If sending fails (channel closed), an error is printed but the loop continues.
-    /// This allows the system to keep running even if individual receivers disconnect.
+    /// Main loop for ticker thread: generates quotes and sends to subscribed receivers.
     fn start_for_quote(
         prices: &Arc<RwLock<HashMap<String, PriceChange>>>,
         recievers: &Arc<RwLock<HashMap<u64, RecieverInfo>>>,
@@ -350,29 +192,7 @@ impl QuoteGenerator {
         }
     }
 
-    /// Adds a receiver subscription for a specific ticker.
-    ///
-    /// If this is a new receiver ID, creates a new entry in the receiver registry
-    /// with the provided channel. If the receiver already exists, adds the ticker
-    /// to their subscription set.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for the receiver
-    /// * `sender` - Channel for sending StockQuotes to this receiver
-    /// * `ticker` - Ticker symbol to subscribe to
-    ///
-    /// # Data Structure Updates
-    /// 1. **recievers map**: Creates or updates the RecieverInfo for this ID
-    ///    - New: Inserts with the channel and ticker in subscription set
-    ///    - Existing: Adds ticker to existing subscription set
-    /// 2. **tickers_to_recievers map**: Adds receiver ID to the ticker's list
-    ///
-    /// # Example
-    /// ```ignore
-    /// let (tx, rx) = mpsc::channel();
-    /// generator.add_reciever(1, tx, "AAPL");
-    /// generator.add_reciever(1, tx, "MSFT"); // Same receiver, different ticker
-    /// ```
+    /// Subscribes receiver to ticker. Creates receiver entry if new, otherwise adds ticker to existing subscriptions.
     pub(crate) fn add_reciever(&mut self, id: u64, sender: Sender<StockQuote>, ticker: &str) {
         // 1. Add receiver if not exists, or update their subscribed tickers
         self.recievers
@@ -397,29 +217,7 @@ impl QuoteGenerator {
             .push(id);
     }
 
-    /// Removes a receiver's subscription to a specific ticker.
-    ///
-    /// If the receiver has no remaining subscriptions after removal, the receiver
-    /// is completely removed from the registry to free resources.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier of the receiver
-    /// * `ticker` - Ticker symbol to unsubscribe from
-    ///
-    /// # Data Structure Updates
-    /// 1. **recievers map**: Removes ticker from subscription set
-    ///    - If subscription set becomes empty, removes the entire receiver entry
-    /// 2. **tickers_to_recievers map**: Removes receiver ID from ticker's list
-    ///
-    /// # Behavior
-    /// - If receiver doesn't exist: No-op, no error
-    /// - If ticker not in receiver's subscriptions: No-op, no error
-    ///
-    /// # Example
-    /// ```ignore
-    /// generator.remove_reciever(1, "AAPL"); // Unsubscribe from AAPL
-    /// // If receiver 1 has no more subscriptions, they're removed completely
-    /// ```
+    /// Unsubscribes receiver from ticker. Removes receiver entirely if no subscriptions remain.
     pub(crate) fn remove_reciever(&mut self, id: u64, ticker: &str) {
         // 1. Remove ticker from receiver's subscription list
         let mut recvs = self.recievers.write().unwrap();
@@ -445,28 +243,7 @@ impl QuoteGenerator {
             });
     }
 
-    /// Removes a receiver completely from all ticker subscriptions.
-    ///
-    /// This is a convenience method for unsubscribing a receiver from all tickers
-    /// at once, typically used when a client disconnects.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier of the receiver to remove
-    ///
-    /// # Implementation
-    /// 1. Retrieves all tickers from receiver's subscription set
-    /// 2. Calls `remove_reciever()` for each ticker
-    /// 3. The receiver entry is removed when the last subscription is removed
-    ///
-    /// # Behavior
-    /// If the receiver doesn't exist, this is a no-op (no error).
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Client disconnects
-    /// generator.remove_reciever_all(client_id);
-    /// // All subscriptions cleaned up, resources freed
-    /// ```
+    /// Unsubscribes receiver from all tickers and removes from registry.
     pub(crate) fn remove_reciever_all(&mut self, id: u64) {
         // Get all tickers this receiver is subscribed to
         let tickers: Vec<String> = self.recievers

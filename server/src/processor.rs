@@ -36,7 +36,7 @@ impl Processor {
                     println!("New worker connected: {}", addr);
 
                     thread::spawn(move || {
-                        if let Err(e) = Self::handle_worker(stream) {
+                        if let Err(e) = Self::handle_request(stream) {
                             eprintln!("Worker handler error: {}", e);
                         }
                     });
@@ -51,7 +51,7 @@ impl Processor {
         Ok(())
     }
 
-    fn handle_worker(mut stream: TcpStream) -> Result<(), ProcessorError> {
+    fn handle_request(mut stream: TcpStream) -> Result<(), ProcessorError> {
         loop {
             let mut len_buf = [0u8; HEADER_LEN];
             match stream.read_exact(&mut len_buf) {
