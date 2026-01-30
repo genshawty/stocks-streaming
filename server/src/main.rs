@@ -2,6 +2,7 @@
 
 pub mod errors;
 mod generator;
+pub mod processor;
 pub mod types;
 
 pub use types::StockQuote;

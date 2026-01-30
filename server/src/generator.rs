@@ -3,10 +3,11 @@ use crate::errors::GeneratorError;
 use rand::Rng;
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::BufReader,
     sync::{Arc, RwLock, mpsc::Sender},
     time::{SystemTime, UNIX_EPOCH},
@@ -17,6 +18,12 @@ const MIN_PRICE: f64 = 0.01; // Minimum price to prevent going to zero
 const BASE_DELAY: u64 = 1000;
 
 const MAX_START_PRICE: f64 = 100.0;
+
+struct RecieverInfo {
+    id: u64,
+    channel: mpsc::Sender<StockQuote>,
+    subscribed_tickers: HashSet<String>,
+}
 
 /// Generates a new price using random walk algorithm.
 /// Changes are proportional to the current price and bounded to prevent negative values.
