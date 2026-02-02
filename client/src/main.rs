@@ -59,7 +59,8 @@ fn main() {
     info!("  UDP Port: {}", args.worker_udp_port);
     info!("  Tickers: {:?}", tickers);
 
-    let worker = Worker::new(args.master_addr, args.master_tcp_port, args.worker_udp_port);
+    let worker = Worker::new(args.master_addr, args.master_tcp_port, args.worker_udp_port)
+        .expect("worker creation error");
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -79,6 +80,13 @@ fn main() {
     info!("Shutting down...");
     *worker.shutdown.write().unwrap() = true;
 
-    let _ = handle.join();
-    info!("Shutdown complete");
+    let res = handle.join().expect("coud not join handle");
+    match res {
+        Ok(()) => {
+            info!("Shutdown complete")
+        }
+        Err(e) => {
+            info!("Shutdown complete with error {e}")
+        }
+    }
 }

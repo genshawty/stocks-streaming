@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_DATAGRAM_SIZE: usize = 65536;
-const MAX_PING_LOGS: usize = 100;
+const MAX_PING_LOGS: usize = 10;
 const BASE_PING_DELAY: u64 = 2;
 
 pub struct PingRecord {
@@ -123,6 +123,7 @@ impl Worker {
                 Ok((size, _src_addr)) => match UdpMessage::from_bytes(buf[..size].to_vec()) {
                     Ok(msg) => {
                         if src_addr.is_none() {
+                            // we pass this to pinging thread and assume server will be sending pongs to the same socket
                             let socket_clone = socket.try_clone().expect("could not clone socket");
                             src_addr = Some(_src_addr);
 
@@ -167,8 +168,23 @@ impl Worker {
                         eprintln!("Failed to deserialize stock quote: {}", e);
                     }
                 },
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Err(ref e) if e.raw_os_error() == Some(35) => continue,
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::TimedOut || e.raw_os_error() == Some(35) =>
+                {
+                    let n_count = pings
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .filter(|x| x.rtt_ms.is_none())
+                        .count();
+                    if n_count >= pings.read().unwrap().len() {
+                        error!(
+                            "no pongs recieved during: {}, shutting down",
+                            (MAX_PING_LOGS as u64) * BASE_PING_DELAY
+                        );
+                        break;
+                    }
+                }
                 Err(e) => {
                     eprintln!("UDP receive error: {}", e);
                 }
