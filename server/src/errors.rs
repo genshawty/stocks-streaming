@@ -10,6 +10,7 @@ pub enum GeneratorError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
+    /// Requested ticker symbol is not in the configured list.
     #[error("Ticker does not exist: {0}")]
     TickerNotExists(String),
 }
@@ -23,12 +24,15 @@ pub enum ProcessorError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
+    /// Failed to parse a command from the client.
     #[error("Parsing error: {0}")]
     ParseErr(#[from] ParseCommandErr),
 
+    /// Quote generator encountered an error.
     #[error("Generator error: {0}")]
     GenErr(#[from] GeneratorError),
 
+    /// Received a message type that the server doesn't handle.
     #[error("Unexpected command")]
     UnexpectedCommand,
 }
@@ -52,10 +56,15 @@ pub enum ParseCommandErr {
     #[error("Invalid port number")]
     InvalidPort,
 
-    /// add documentation
+    /// Message data is not valid UTF-8.
     #[error("Invalid encoding")]
     Utf8Error(#[from] std::str::Utf8Error),
 
+    /// Message size exceeds the 10MB limit (DoS protection).
+    #[error("Message too big")]
+    MsgToBig,
+
+    /// Command type is not recognized.
     #[error("Unknown command")]
     UnknownCommand,
 }

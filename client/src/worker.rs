@@ -1,8 +1,10 @@
 use crate::errors::WorkerError;
 use log::{error, info};
-use server::{Commands, Protocol, SubscribeCommand, UdpMessage};
+use server::{
+    Commands, Protocol, SubscribeCommand, TcpMessage, UdpMessage, errors::ParseCommandErr,
+};
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -19,17 +21,21 @@ const BASE_PING_DELAY: u64 = 2;
 
 /// A single ping measurement. `rtt_ms` is filled in when the matching pong arrives.
 pub struct PingRecord {
+    /// Unix timestamp when the ping was sent.
     timestamp: u64,
+    /// Round-trip time in milliseconds (None until pong received).
     rtt_ms: Option<u64>,
 }
 
 /// Client worker that subscribes to the master server via TCP
 /// and receives stock quotes over UDP.
 pub struct Worker {
+    /// IPv4 address of the master server.
     pub master_addr: Ipv4Addr,
+    /// TCP port for connecting to the master server.
     pub master_tcp_port: u16,
+    /// UDP port for receiving quotes.
     pub worker_udp_port: u16,
-
     /// Shared shutdown flag, set by Ctrl+C handler or when pongs stop arriving.
     pub shutdown: Arc<RwLock<bool>>,
     /// Ring buffer of recent ping records for RTT tracking.
@@ -74,14 +80,43 @@ impl Worker {
                         "Connected to master at {}:{}",
                         self.master_addr, self.master_tcp_port
                     );
+                    let mut stream_clone = stream.try_clone().expect("failed to clone stream");
+                    let read_handle =
+                        thread::spawn(move || Worker::read_tcp_message(&mut stream_clone));
 
                     if let Err(e) = self.send_command(stream, tickers.clone()) {
                         error!("Work error: {}", e);
                         info!("Reconnecting in 3 seconds...");
                         std::thread::sleep(Duration::from_secs(3));
-                    } else {
-                        info!("Successfully subscribed, receiving quotes...");
-                        break;
+                        continue;
+                    }
+
+                    // Wait for server acknowledgment
+                    match read_handle.join() {
+                        Ok(Ok(TcpMessage::Ack)) => {
+                            info!("Server acknowledged, receiving quotes...");
+                            break;
+                        }
+                        Ok(Ok(TcpMessage::Err(err))) => {
+                            error!("Server returned an error: {err}");
+                            info!("Reconnecting in 3 seconds...");
+                            std::thread::sleep(Duration::from_secs(3));
+                        }
+                        Ok(Ok(msg)) => {
+                            error!("Unexpected message from server: {:?}", msg);
+                            info!("Reconnecting in 3 seconds...");
+                            std::thread::sleep(Duration::from_secs(3));
+                        }
+                        Ok(Err(e)) => {
+                            error!("Error reading from server: {}", e);
+                            info!("Reconnecting in 3 seconds...");
+                            std::thread::sleep(Duration::from_secs(3));
+                        }
+                        Err(_) => {
+                            error!("TCP read thread panicked");
+                            info!("Reconnecting in 3 seconds...");
+                            std::thread::sleep(Duration::from_secs(3));
+                        }
                     }
                 }
                 Err(e) => {
@@ -93,16 +128,52 @@ impl Worker {
         handle
     }
 
+    fn read_tcp_message(stream: &mut TcpStream) -> Result<TcpMessage, WorkerError> {
+        // Read 4-byte message length prefix
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                error!("Server disconnected while reading message length");
+            } else {
+                error!("Error reading message length: {}", e);
+            }
+            WorkerError::from(e)
+        })?;
+
+        // Read message data
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        if msg_len > 1e7 as usize {
+            return Err(ParseCommandErr::MsgToBig.into());
+        }
+        let mut data = vec![0u8; msg_len];
+        stream.read_exact(&mut data).map_err(|e| {
+            error!("Error reading message data (length: {}): {}", msg_len, e);
+            WorkerError::from(e)
+        })?;
+
+        // Parse UTF-8 string
+        let msg_str = std::str::from_utf8(&data).map_err(|e| {
+            error!("Invalid UTF-8 in message data: {}", e);
+            WorkerError::ParseErr(e.into())
+        })?;
+
+        // Parse TcpMessage
+        TcpMessage::from_string(msg_str).map_err(|e| {
+            error!("Failed to parse TCP message '{}': {}", msg_str, e);
+            e.into()
+        })
+    }
+
     /// Sends a length-prefixed subscribe command over TCP.
     fn send_command(&self, mut stream: TcpStream, tickers: Vec<String>) -> Result<(), WorkerError> {
-        let cmd = SubscribeCommand {
+        let cmd = TcpMessage::Cmd(SubscribeCommand {
             cmd: Commands::Stream,
             protocol: Protocol::Udp,
             // let it be hardcoded
             ip: Ipv4Addr::new(127, 0, 0, 1),
             port: self.worker_udp_port,
             tickers_list: tickers,
-        }
+        })
         .to_string();
         let cmd_bytes = cmd.as_bytes();
         let data_len = (cmd_bytes.len() as u32).to_be_bytes();

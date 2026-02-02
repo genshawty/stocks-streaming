@@ -1,9 +1,6 @@
 use crate::StockQuote;
 use crate::errors::GeneratorError;
-use core::error;
 use rand::Rng;
-use std::collections::VecDeque;
-use std::hash::Hash;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use log::{debug, error, info};
+use log::{debug, error};
 
 /// Maximum percentage change allowed per price update (2%)
 const MAX_CHANGE_PERCENT: f64 = 0.02;
@@ -33,8 +30,9 @@ const MAX_START_PRICE: f64 = 100.0;
 
 /// Receiver with channel and subscribed tickers.
 pub(crate) struct ReceiverInfo {
-    id: u64,
+    /// Channel for sending stock quotes to this receiver.
     channel: mpsc::Sender<StockQuote>,
+    /// Set of ticker symbols this receiver is subscribed to.
     subscribed_tickers: HashSet<String>,
 }
 
@@ -60,7 +58,9 @@ fn generate_initial_price() -> f64 {
 
 /// Current price and last update timestamp for a ticker.
 pub(crate) struct PriceChange {
+    /// Current price of the ticker.
     price: f64,
+    /// Unix timestamp of the last price update.
     last_change: u64,
 }
 
@@ -74,10 +74,13 @@ pub(crate) struct PriceChange {
 /// Each ticker runs in its own thread generating quotes. When a quote is generated,
 /// it looks up subscribed receivers and sends via their channels.
 pub(crate) struct QuoteGenerator {
+    /// Map of ticker symbols to current prices and timestamps.
     pub(crate) prices: Arc<RwLock<HashMap<String, PriceChange>>>,
+    /// Map of receiver IDs to their channels and subscriptions.
     pub(crate) receivers: Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
+    /// Map of ticker symbols to sets of subscribed receiver IDs.
     pub(crate) tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
-
+    /// Atomic flag to signal shutdown to all ticker threads.
     pub(crate) shutdown: Arc<AtomicBool>,
 }
 
@@ -266,7 +269,6 @@ impl QuoteGenerator {
         self.receivers.write().unwrap().insert(
             id,
             ReceiverInfo {
-                id,
                 channel: sender,
                 subscribed_tickers: tickers_set,
             },
@@ -457,7 +459,7 @@ mod tests {
         // Check receiver was added
         let recvs = qg.receivers.read().unwrap();
         assert!(recvs.contains_key(&1));
-        assert_eq!(recvs.get(&1).unwrap().id, 1);
+        // assert_eq!(recvs.get(&1).unwrap().id, 1);
         assert!(recvs.get(&1).unwrap().subscribed_tickers.contains("AAPL"));
 
         // Check ticker subscription list was updated
@@ -607,7 +609,6 @@ mod tests {
             recvs.insert(
                 1,
                 ReceiverInfo {
-                    id: 1,
                     channel: tx,
                     subscribed_tickers: HashSet::from(["AAPL".to_string()]),
                 },

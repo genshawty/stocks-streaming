@@ -59,14 +59,25 @@ impl StockQuote {
     }
 }
 
+/// Messages sent over UDP between client and server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UdpMessage {
+    /// Stock quote data.
     Quote(StockQuote),
-    Ping { timestamp: u64 },
-    Pong { timestamp: u64 },
+    /// Health check ping from client with timestamp.
+    Ping {
+        /// Unix timestamp when ping was sent.
+        timestamp: u64
+    },
+    /// Health check pong response with original timestamp.
+    Pong {
+        /// Unix timestamp from the original ping.
+        timestamp: u64
+    },
 }
 
 impl UdpMessage {
+    /// Serializes message to binary format using bincode.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         Ok(bincode::serialize(&self)?)
     }
@@ -150,14 +161,24 @@ impl fmt::Display for SubscribeCommand {
     }
 }
 
+/// Messages exchanged over TCP between client and server.
 #[derive(Debug, Clone)]
 pub enum TcpMessage {
+    /// Acknowledgement of successful command processing.
     Ack,
+    /// Subscribe command from client.
     Cmd(SubscribeCommand),
+    /// Error message from server.
     Err(String),
 }
 
 impl TcpMessage {
+    /// Serializes message to string format.
+    ///
+    /// Format:
+    /// - Ack: "ACK"
+    /// - Cmd: "CMD|STREAM|UDP|IP|PORT|TICKERS"
+    /// - Err: "ERR|error message"
     pub fn to_string(&self) -> String {
         match self {
             TcpMessage::Ack => "ACK".to_string(),
@@ -166,6 +187,12 @@ impl TcpMessage {
         }
     }
 
+    /// Deserializes message from pipe-delimited string format.
+    ///
+    /// Expects one of:
+    /// - "ACK"
+    /// - "CMD|STREAM|UDP|IP|PORT|TICKERS"
+    /// - "ERR|error message"
     pub fn from_string(s: &str) -> Result<Self, ParseCommandErr> {
         let parts: Vec<&str> = s.splitn(2, '|').collect();
 

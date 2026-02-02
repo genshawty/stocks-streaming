@@ -1,3 +1,4 @@
+use server::errors::ParseCommandErr;
 use std::io;
 use thiserror::Error;
 
@@ -7,4 +8,8 @@ pub enum WorkerError {
     /// Network or socket I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+
+    /// Failed to parse a command from the server.
+    #[error("Parsing error: {0}")]
+    ParseErr(#[from] ParseCommandErr),
 }

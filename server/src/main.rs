@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Stock quote streaming server
 //!
 //! This server generates random stock quotes and streams them to subscribed clients via UDP.
@@ -9,9 +10,13 @@ use log::{error, info};
 use processor::Processor;
 use std::path::PathBuf;
 
+/// Error types for the server.
 pub mod errors;
+/// Stock quote generator.
 pub mod generator;
+/// TCP server and subscriber management.
 pub mod processor;
+/// Data types for quotes, commands, and messages.
 pub mod types;
 
 pub use types::StockQuote;

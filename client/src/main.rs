@@ -1,3 +1,9 @@
+#![warn(missing_docs)]
+//! Stock quote streaming client.
+//!
+//! Connects to the trading stream server via TCP to subscribe to tickers,
+//! then receives real-time quotes via UDP.
+
 mod errors;
 mod worker;
 
@@ -9,7 +15,9 @@ use log::info;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Default TCP port for connecting to the master server.
 const MASTER_TCP_PORT: u16 = 8090;
+/// Default UDP port for receiving stock quotes.
 const WORKER_UDP_PORT: u16 = 8091;
 
 #[derive(Parser, Debug)]
