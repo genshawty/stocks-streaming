@@ -9,6 +9,9 @@ pub enum GeneratorError {
     /// Wraps the underlying [`std::io::Error`].
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+
+    #[error("Ticker does not exist: {0}")]
+    TickerNotExists(String),
 }
 
 /// Errors that can occur during quote processing.

@@ -3,6 +3,7 @@ use crate::errors::GeneratorError;
 use core::error;
 use rand::Rng;
 use std::collections::VecDeque;
+use std::hash::Hash;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -30,7 +31,7 @@ const BASE_DELAY: u64 = 1000;
 const MAX_START_PRICE: f64 = 100.0;
 
 /// Receiver with channel and subscribed tickers.
-pub(crate) struct RecieverInfo {
+pub(crate) struct ReceiverInfo {
     id: u64,
     channel: mpsc::Sender<StockQuote>,
     subscribed_tickers: HashSet<String>,
@@ -66,15 +67,15 @@ pub(crate) struct PriceChange {
 ///
 /// Uses three maps for efficient management:
 /// - `prices`: ticker -> current price/timestamp
-/// - `recievers`: receiver_id -> channel + subscribed tickers
-/// - `tickers_to_recievers`: ticker -> [receiver_ids]
+/// - `receivers`: receiver_id -> channel + subscribed tickers
+/// - `tickers_to_receivers`: ticker -> [receiver_ids]
 ///
 /// Each ticker runs in its own thread generating quotes. When a quote is generated,
 /// it looks up subscribed receivers and sends via their channels.
 pub(crate) struct QuoteGenerator {
     pub(crate) prices: Arc<RwLock<HashMap<String, PriceChange>>>,
-    pub(crate) recievers: Arc<RwLock<HashMap<u64, RecieverInfo>>>,
-    pub(crate) tickers_to_recievers: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    pub(crate) receivers: Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
+    pub(crate) tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
 }
 
 impl QuoteGenerator {
@@ -93,13 +94,13 @@ impl QuoteGenerator {
                     last_change: 0u64,
                 },
             );
-            tickers_recv_hm.insert(ticker, Vec::new());
+            tickers_recv_hm.insert(ticker, HashSet::new());
         }
 
         Self {
             prices: Arc::new(RwLock::new(prices_hm)),
-            recievers: Arc::new(RwLock::new(HashMap::new())),
-            tickers_to_recievers: Arc::new(RwLock::new(tickers_recv_hm)),
+            receivers: Arc::new(RwLock::new(HashMap::new())),
+            tickers_to_receivers: Arc::new(RwLock::new(tickers_recv_hm)),
         }
     }
 
@@ -119,19 +120,19 @@ impl QuoteGenerator {
     /// Takes Arc parameters to avoid holding mutex lock during execution.
     pub(crate) fn start(
         prices: Arc<RwLock<HashMap<String, PriceChange>>>,
-        receivers: Arc<RwLock<HashMap<u64, RecieverInfo>>>,
-        tickers_to_recievers: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+        receivers: Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
+        tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
     ) {
         let tickers: Vec<_> = prices.read().unwrap().keys().cloned().collect();
         for ticker in tickers {
             let prices_clone = Arc::clone(&prices);
             let receivers_clone = Arc::clone(&receivers);
-            let tickers_to_recievers_clone = Arc::clone(&tickers_to_recievers);
+            let tickers_to_receivers_clone = Arc::clone(&tickers_to_receivers);
             thread::spawn(move || {
                 Self::start_for_quote(
                     &prices_clone,
                     &receivers_clone,
-                    &tickers_to_recievers_clone,
+                    &tickers_to_receivers_clone,
                     &ticker,
                     BASE_DELAY,
                 );
@@ -177,15 +178,15 @@ impl QuoteGenerator {
             ticker: ticker.to_string(),
             price: new_price,
             volume,
-            timestamp: timestamp,
+            timestamp,
         })
     }
 
     /// Main loop for ticker thread: generates quotes and sends to subscribed receivers.
     fn start_for_quote(
         prices: &Arc<RwLock<HashMap<String, PriceChange>>>,
-        recievers: &Arc<RwLock<HashMap<u64, RecieverInfo>>>,
-        tickers_to_recievers: &Arc<RwLock<HashMap<String, Vec<u64>>>>,
+        receivers: &Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
+        tickers_to_receivers: &Arc<RwLock<HashMap<String, HashSet<u64>>>>,
         ticker: &str,
         delay: u64,
     ) {
@@ -193,8 +194,8 @@ impl QuoteGenerator {
         loop {
             let quote = Self::generate_quote(prices, ticker);
             if let Some(quote) = quote {
-                let tickers_to_recv_guard = tickers_to_recievers.read().unwrap();
-                let recv_guard = recievers.read().unwrap();
+                let tickers_to_recv_guard = tickers_to_receivers.read().unwrap();
+                let recv_guard = receivers.read().unwrap();
                 if let Some(list) = tickers_to_recv_guard.get(ticker) {
                     for receiver_id in list {
                         if let Some(receiver_info) = recv_guard.get(receiver_id) {
@@ -211,12 +212,12 @@ impl QuoteGenerator {
                 }
             }
             if dead_recv.len() > 0 {
-                debug!("cleaning up {} recievers", dead_recv.len());
+                debug!("cleaning up {} receivers", dead_recv.len());
                 for id in dead_recv.iter() {
-                    QuoteGenerator::remove_reciever(
+                    QuoteGenerator::remove_receiver(
                         *id,
-                        &recievers.clone(),
-                        &tickers_to_recievers.clone(),
+                        &receivers.clone(),
+                        &tickers_to_receivers.clone(),
                     );
                 }
                 dead_recv.clear();
@@ -225,8 +226,12 @@ impl QuoteGenerator {
         }
     }
 
-    /// Subscribes receiver to multiple tickers. Creates receiver entry if new, otherwise adds tickers to existing subscriptions.
-    pub(crate) fn add_reciever(
+    /// Subscribes receiver to tickers and registers its channel.
+    ///
+    /// Safety: IDs are generated via `AtomicU64::fetch_add` in `Processor::add_subscriber`,
+    /// so duplicate IDs cannot occur. This function unconditionally inserts, overwriting any
+    /// stale entry. If ID generation changes to allow reuse, this must be revisited.
+    pub(crate) fn add_receiver(
         &mut self,
         id: u64,
         sender: Sender<StockQuote>,
@@ -234,35 +239,33 @@ impl QuoteGenerator {
     ) {
         let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
 
-        // 1. Add receiver if not exists, or update their subscribed tickers
-        self.recievers
-            .write()
-            .unwrap()
-            .entry(id)
-            .and_modify(|info| {
-                info.subscribed_tickers.extend(tickers_set.clone());
-            })
-            .or_insert(RecieverInfo {
+        self.receivers.write().unwrap().insert(
+            id,
+            ReceiverInfo {
                 id,
                 channel: sender,
                 subscribed_tickers: tickers_set,
-            });
+            },
+        );
 
         // 2. Add receiver ID to each ticker's subscription list
-        let mut ticker_subs = self.tickers_to_recievers.write().unwrap();
+        let mut ticker_subs = self.tickers_to_receivers.write().unwrap();
         for ticker in tickers {
-            ticker_subs.entry(ticker).or_insert(Vec::new()).push(id);
+            ticker_subs
+                .entry(ticker)
+                .or_insert(HashSet::new())
+                .insert(id);
         }
     }
 
     /// Unsubscribes receiver from all tickers and removes from registry.
-    pub(crate) fn remove_reciever(
+    pub(crate) fn remove_receiver(
         id: u64,
-        recievers: &Arc<RwLock<HashMap<u64, RecieverInfo>>>,
-        tickers_to_recievers: &Arc<RwLock<HashMap<String, Vec<u64>>>>,
+        receivers: &Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
+        tickers_to_receivers: &Arc<RwLock<HashMap<String, HashSet<u64>>>>,
     ) {
         // 1. Get all tickers this receiver is subscribed to
-        let tickers: Vec<String> = recievers
+        let tickers: Vec<String> = receivers
             .read()
             .unwrap()
             .get(&id)
@@ -270,15 +273,13 @@ impl QuoteGenerator {
             .unwrap_or_default();
 
         // 2. Remove receiver from registry
-        recievers.write().unwrap().remove(&id);
+        receivers.write().unwrap().remove(&id);
 
-        // 3. Remove receiver ID from all ticker lists
-        let mut ticker_subs = tickers_to_recievers.write().unwrap();
+        // 3. Remove receiver ID from all ticker sets
+        let mut ticker_subs = tickers_to_receivers.write().unwrap();
         for ticker in tickers {
             if let Some(ids) = ticker_subs.get_mut(&ticker) {
-                if let Some(pos) = ids.iter().position(|&x| x == id) {
-                    ids.remove(pos);
-                }
+                ids.remove(&id);
             }
         }
     }
@@ -422,146 +423,146 @@ mod tests {
         assert!(avg_popular > avg_regular);
     }
 
-    // -- add_reciever / remove_reciever tests --
+    // -- add_receiver / remove_receiver tests --
 
     #[test]
-    fn add_reciever_creates_subscription() {
+    fn add_receiver_creates_subscription() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _rx) = mpsc::channel();
-        qg.add_reciever(1, tx, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string()]);
 
         // Check receiver was added
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert!(recvs.contains_key(&1));
         assert_eq!(recvs.get(&1).unwrap().id, 1);
         assert!(recvs.get(&1).unwrap().subscribed_tickers.contains("AAPL"));
 
         // Check ticker subscription list was updated
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 1);
-        assert_eq!(ticker_subs.get("AAPL").unwrap()[0], 1);
+        assert!(ticker_subs.get("AAPL").unwrap().contains(&1));
     }
 
     #[test]
-    fn add_multiple_recievers_same_ticker() {
+    fn add_multiple_receivers_same_ticker() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_reciever(1, tx1, vec!["AAPL".to_string()]);
-        qg.add_reciever(2, tx2, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]);
+        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]);
 
         // Check both receivers exist
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert_eq!(recvs.len(), 2);
         assert!(recvs.contains_key(&1));
         assert!(recvs.contains_key(&2));
 
         // Check ticker has both receivers
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 2);
     }
 
     #[test]
-    fn remove_reciever_removes_correct_subscription() {
+    fn remove_receiver_removes_correct_subscription() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_reciever(1, tx1, vec!["AAPL".to_string()]);
-        qg.add_reciever(2, tx2, vec!["AAPL".to_string()]);
-        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
+        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]);
+        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]);
+        QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should be removed
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert!(!recvs.contains_key(&1));
         assert!(recvs.contains_key(&2));
 
         // Ticker should only have receiver 2
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         let aapl_subs = ticker_subs.get("AAPL").unwrap();
         assert_eq!(aapl_subs.len(), 1);
-        assert_eq!(aapl_subs[0], 2);
+        assert!(aapl_subs.contains(&2));
     }
 
     #[test]
-    fn remove_reciever_nonexistent_id_does_nothing() {
+    fn remove_receiver_nonexistent_id_does_nothing() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
-        qg.add_reciever(1, tx, vec!["AAPL".to_string()]);
-        QuoteGenerator::remove_reciever(999, &qg.recievers, &qg.tickers_to_recievers);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string()]);
+        QuoteGenerator::remove_receiver(999, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should still exist
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert!(recvs.contains_key(&1));
         assert_eq!(recvs.len(), 1);
 
         // Ticker should still have receiver 1
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 1);
     }
 
     #[test]
-    fn add_reciever_multiple_tickers_same_receiver() {
+    fn add_receiver_multiple_tickers_same_receiver() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
 
-        // Use add_reciever with multiple tickers
-        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        // Use add_receiver with multiple tickers
+        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
 
         // Receiver should exist with both tickers
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert_eq!(recvs.len(), 1);
         let recv = recvs.get(&1).unwrap();
         assert!(recv.subscribed_tickers.contains("AAPL"));
         assert!(recv.subscribed_tickers.contains("MSFT"));
 
         // Both tickers should reference this receiver
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert!(ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(ticker_subs.get("MSFT").unwrap().contains(&1));
     }
 
     #[test]
-    fn remove_reciever_removes_from_all_subscriptions() {
+    fn remove_receiver_removes_from_all_subscriptions() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string(), "MSFT".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
 
         // Add receiver with both tickers
-        qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
 
-        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
+        QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver should be completely removed
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert!(!recvs.contains_key(&1));
 
         // Neither ticker should have this receiver
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert!(!ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(!ticker_subs.get("MSFT").unwrap().contains(&1));
     }
 
     #[test]
-    fn remove_reciever_removes_from_multiple_tickers() {
+    fn remove_receiver_removes_from_multiple_tickers() {
         let mut qg = QuoteGenerator::new(
             vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()].into_iter(),
         );
         let (tx, _) = mpsc::channel();
 
         // Add receiver with all three tickers
-        qg.add_reciever(
+        qg.add_receiver(
             1,
             tx,
             vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()],
         );
 
-        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
+        QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver should be completely removed
-        let recvs = qg.recievers.read().unwrap();
+        let recvs = qg.receivers.read().unwrap();
         assert!(!recvs.contains_key(&1));
 
         // All tickers should not have this receiver
-        let ticker_subs = qg.tickers_to_recievers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
         assert!(!ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(!ticker_subs.get("MSFT").unwrap().contains(&1));
         assert!(!ticker_subs.get("TSLA").unwrap().contains(&1));
@@ -576,10 +577,10 @@ mod tests {
 
         // Manually insert receiver using new structure
         {
-            let mut recvs = qg.recievers.write().unwrap();
+            let mut recvs = qg.receivers.write().unwrap();
             recvs.insert(
                 1,
-                RecieverInfo {
+                ReceiverInfo {
                     id: 1,
                     channel: tx,
                     subscribed_tickers: HashSet::from(["AAPL".to_string()]),
@@ -587,16 +588,16 @@ mod tests {
             );
         }
         {
-            let mut ticker_subs = qg.tickers_to_recievers.write().unwrap();
-            ticker_subs.insert("AAPL".to_string(), vec![1]);
+            let mut ticker_subs = qg.tickers_to_receivers.write().unwrap();
+            ticker_subs.insert("AAPL".to_string(), HashSet::from([1]));
         }
 
         let prices = Arc::clone(&qg.prices);
-        let receivers = Arc::clone(&qg.recievers);
-        let tickers_to_recievers = Arc::clone(&qg.tickers_to_recievers);
+        let receivers = Arc::clone(&qg.receivers);
+        let tickers_to_receivers = Arc::clone(&qg.tickers_to_receivers);
         let handle = thread::spawn(move || {
             // Run with a very short delay; we only need a couple of quotes
-            QuoteGenerator::start_for_quote(&prices, &receivers, &tickers_to_recievers, "AAPL", 10);
+            QuoteGenerator::start_for_quote(&prices, &receivers, &tickers_to_receivers, "AAPL", 10);
         });
 
         // Collect a few quotes then verify

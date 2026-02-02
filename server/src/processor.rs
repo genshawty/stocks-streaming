@@ -61,17 +61,17 @@ impl Processor {
         listener.set_nonblocking(true)?;
 
         // Clone Arc parameters without holding the mutex lock
-        let (prices, receivers, tickers_to_recievers) = {
+        let (prices, receivers, tickers_to_receivers) = {
             let generator_guard = self.generator.lock().unwrap();
             (
                 Arc::clone(&generator_guard.prices),
-                Arc::clone(&generator_guard.recievers),
-                Arc::clone(&generator_guard.tickers_to_recievers),
+                Arc::clone(&generator_guard.receivers),
+                Arc::clone(&generator_guard.tickers_to_receivers),
             )
         }; // Lock is released here
 
         // Start generator threads
-        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_recievers));
+        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_receivers));
 
         loop {
             if *self.shutdown.read().unwrap() {
@@ -170,7 +170,7 @@ impl Processor {
         // 4. Register with generator for all tickers
         {
             let mut generator_lock = generator.lock().unwrap();
-            generator_lock.add_reciever(id, tx.clone(), cmd.tickers_list.clone());
+            generator_lock.add_receiver(id, tx.clone(), cmd.tickers_list.clone());
         }
 
         // 5. Create subscriber info for streaming thread
@@ -224,12 +224,12 @@ impl Processor {
             let (recv, tickers_to_recv) = {
                 let generator_lock = generator.lock().unwrap();
                 (
-                    generator_lock.recievers.clone(),
-                    generator_lock.tickers_to_recievers.clone(),
+                    generator_lock.receivers.clone(),
+                    generator_lock.tickers_to_receivers.clone(),
                 )
             };
 
-            QuoteGenerator::remove_reciever(id, &recv, &tickers_to_recv);
+            QuoteGenerator::remove_receiver(id, &recv, &tickers_to_recv);
 
             println!("Subscriber {} removed", id);
         }
