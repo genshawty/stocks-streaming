@@ -99,3 +99,43 @@ RUST_LOG=debug cargo run --package server
 ├── Makefile         # Build and run commands
 └── Cargo.toml       # Workspace configuration
 ```
+
+## Known Issues
+
+### Immediate Client Restart Issue
+
+**Problem**: When stopping a client with Ctrl+C and immediately restarting it, the new client may be disconnected after 5 seconds with "no ping" error, even though the old client has stopped.
+
+**Root Cause**:
+- The server's `monitor_connection` function initializes the ping timeout timer (`last_ping = Instant::now()`) immediately when a subscriber is created, rather than waiting for the first ping
+- The client only starts sending pings after receiving its first UDP packet from the server
+- This creates a race condition where the client may not send its first ping within the 5-second timeout window
+
+**Contributing Factors**:
+- UDP port binding conflicts when restarting quickly (both old and new client trying to use the same port)
+- OS may not release the UDP socket immediately after process termination
+- Potential packet loss during the overlap period
+
+**Workarounds**:
+- Wait 5+ seconds between stopping and restarting the client
+- Use a different UDP port for each client instance (`-u` flag)
+
+**TODO - Potential Fixes**:
+
+1. **Server-side** (Recommended): Modify `monitor_connection` in [server/src/processor.rs:421-479](server/src/processor.rs#L421-L479) to not start the timeout until the first ping is received:
+   ```rust
+   let mut last_ping: Option<Instant> = None;
+   // Don't check timeout until first ping received
+   ```
+
+2. **Client-side**: Enable `SO_REUSEADDR` on the UDP socket in [client/src/worker.rs:100](client/src/worker.rs#L100) to allow immediate port rebinding:
+   ```rust
+   // Add socket2 = "0.5" to Cargo.toml
+   use socket2::{Domain, Protocol, Socket, Type};
+   let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+   socket.set_reuse_address(true)?;
+   socket.bind(&addr.into())?;
+   let socket: UdpSocket = socket.into();
+   ```
+
+3. **Server-side**: Detect and remove duplicate subscribers sending to the same UDP endpoint before creating a new subscriber
