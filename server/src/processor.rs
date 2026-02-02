@@ -1,3 +1,4 @@
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -10,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::errors::ProcessorError;
-use crate::generator::{self, QuoteGenerator};
+use crate::generator::QuoteGenerator;
 use crate::types::{StockQuote, SubscribeCommand, UdpMessage};
 
 const MAX_PING_TIMEOUT: u64 = 5;
@@ -57,7 +58,7 @@ impl Processor {
 
     pub(crate) fn start_tcp_server(&self) -> Result<(), ProcessorError> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))?;
-        println!("TCP server started on port {}", self.port);
+        info!("TCP server started on port {}", self.port);
         listener.set_nonblocking(true)?;
 
         // Clone Arc parameters without holding the mutex lock
@@ -72,17 +73,19 @@ impl Processor {
         }; // Lock is released here
 
         // Start generator threads
-        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_receivers, gen_shutdown));
+        thread::spawn(|| {
+            QuoteGenerator::start(prices, receivers, tickers_to_receivers, gen_shutdown)
+        });
 
         loop {
             if *self.shutdown.read().unwrap() {
-                println!("TCP server shutting down");
+                info!("TCP server shutting down");
                 break;
             }
 
             match listener.accept() {
                 Ok((stream, addr)) => {
-                    println!("New worker connected: {}", addr);
+                    info!("New worker connected: {}", addr);
                     let gen_clone = self.generator.clone();
                     let subscribers_clone = self.subscribers.clone();
                     let next_clone = self.next_id.clone();
@@ -91,14 +94,14 @@ impl Processor {
                         if let Err(e) =
                             Self::handle_request(stream, gen_clone, subscribers_clone, next_clone)
                         {
-                            eprintln!("Worker handler error: {}", e);
+                            error!("Worker handler error: {}", e);
                         }
                     });
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => eprintln!("Accept error: {}", e),
+                Err(e) => error!("Accept TCP error: {}", e),
             }
         }
 
@@ -133,7 +136,7 @@ impl Processor {
                             break;
                         }
                         Err(e) => {
-                            println!("Error reading data: {}. Client disconnected.", e);
+                            error!("Error reading data: {}. Client disconnected.", e);
                             break;
                         }
                     }
@@ -141,9 +144,9 @@ impl Processor {
                 Err(e) => {
                     // Connection closed or error - break out of loop
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        println!("Client disconnected");
+                        error!("Client disconnected");
                     } else {
-                        println!("Error reading header: {}", e);
+                        error!("Error reading header: {}", e);
                     }
                     break;
                 }

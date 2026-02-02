@@ -117,7 +117,8 @@ impl QuoteGenerator {
             .lines()
             .collect::<Result<Vec<_>, std::io::Error>>()?
             .into_iter()
-            .map(|x| x.trim().to_owned());
+            .map(|x| x.trim().to_owned())
+            .filter(|x| !x.is_empty());
         Ok(QuoteGenerator::new(tickers))
     }
 
@@ -207,31 +208,32 @@ impl QuoteGenerator {
             }
             let quote = Self::generate_quote(prices, ticker);
             if let Some(quote) = quote {
-                let tickers_to_recv_guard = tickers_to_receivers.read().unwrap();
+                let receiver_ids: Vec<u64> = {
+                    let tickers_to_recv_guard = tickers_to_receivers.read().unwrap();
+                    tickers_to_recv_guard
+                        .get(ticker)
+                        .map(|x| x.iter().copied().collect())
+                        .unwrap_or_default()
+                };
+
                 let recv_guard = receivers.read().unwrap();
-                if let Some(list) = tickers_to_recv_guard.get(ticker) {
-                    for receiver_id in list {
-                        if let Some(receiver_info) = recv_guard.get(receiver_id) {
-                            if receiver_info.channel.send(quote.clone()).is_err() {
-                                // Channel closed - receiver disconnected
-                                error!(
-                                    "Error sending quote to receiver {}: channel closed, cleaning up",
-                                    receiver_id
-                                );
-                                dead_recv.insert(receiver_id.to_owned());
-                            }
+                for receiver_id in receiver_ids {
+                    if let Some(receiver_info) = recv_guard.get(&receiver_id) {
+                        if receiver_info.channel.send(quote.clone()).is_err() {
+                            // Channel closed - receiver disconnected
+                            error!(
+                                "Error sending quote to receiver {}: channel closed, cleaning up",
+                                receiver_id
+                            );
+                            dead_recv.insert(receiver_id.to_owned());
                         }
                     }
                 }
             }
-            if dead_recv.len() > 0 {
+            if !dead_recv.is_empty() {
                 debug!("cleaning up {} receivers", dead_recv.len());
                 for id in dead_recv.iter() {
-                    QuoteGenerator::remove_receiver(
-                        *id,
-                        &receivers.clone(),
-                        &tickers_to_receivers.clone(),
-                    );
+                    QuoteGenerator::remove_receiver(*id, &receivers, &tickers_to_receivers);
                 }
                 dead_recv.clear();
             }
@@ -258,7 +260,6 @@ impl QuoteGenerator {
                 return Err(GeneratorError::TickerNotExists(ticker.clone()));
             }
         }
-        drop(ticker_subs);
 
         let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
 
@@ -271,12 +272,10 @@ impl QuoteGenerator {
             },
         );
 
+        drop(ticker_subs);
         let mut ticker_subs = self.tickers_to_receivers.write().unwrap();
         for ticker in tickers {
-            ticker_subs
-                .entry(ticker)
-                .or_insert(HashSet::new())
-                .insert(id);
+            ticker_subs.entry(ticker).or_default().insert(id);
         }
 
         Ok(())
@@ -625,7 +624,14 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            QuoteGenerator::start_for_quote(&prices, &receivers, &tickers_to_receivers, "AAPL", 10, shutdown_clone);
+            QuoteGenerator::start_for_quote(
+                &prices,
+                &receivers,
+                &tickers_to_receivers,
+                "AAPL",
+                10,
+                shutdown_clone,
+            );
         });
 
         // Collect a few quotes then verify

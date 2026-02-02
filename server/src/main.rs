@@ -10,7 +10,7 @@ use processor::Processor;
 use std::path::PathBuf;
 
 pub mod errors;
-mod generator;
+pub mod generator;
 pub mod processor;
 pub mod types;
 
