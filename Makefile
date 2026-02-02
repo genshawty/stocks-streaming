@@ -9,7 +9,7 @@ server:
 	cargo build --package server
 
 run-client:
-	cargo run --package client
+	cargo run --package client -- -f server/src/data/tickers.txt
 
 run-server:
 	cargo run --package server -- -t=server/src/data/tickers.txt

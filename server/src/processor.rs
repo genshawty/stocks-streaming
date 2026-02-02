@@ -13,6 +13,8 @@ use crate::errors::ProcessorError;
 use crate::generator::{self, QuoteGenerator};
 use crate::types::{StockQuote, SubscribeCommand, UdpMessage};
 
+const MAX_PING_TIMEOUT: u64 = 5;
+
 /// Handle to a subscriber's streaming thread.
 struct SubscriberHandle {
     id: u64,
@@ -179,10 +181,10 @@ impl Processor {
             udp_addr: SocketAddr::new(cmd.ip.into(), cmd.port),
             shutdown: Arc::clone(&shutdown),
         };
-
+        let subscribers_clone = subscribers.clone();
         // 6. Spawn streaming thread
         let handle = thread::spawn(move || {
-            Self::start_streaming(sub_info);
+            Self::start_streaming(sub_info, generator, subscribers_clone);
         });
 
         // 7. Store handle
@@ -204,9 +206,13 @@ impl Processor {
     }
 
     /// Removes subscriber and cleans up resources.
-    fn remove_subscriber(&self, id: u64) {
+    fn remove_subscriber(
+        id: u64,
+        generator: Arc<Mutex<QuoteGenerator>>,
+        subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
+    ) {
         // 1. Remove from subscribers map
-        let handle = self.subscribers.write().unwrap().remove(&id);
+        let handle = subscribers.write().unwrap().remove(&id);
 
         if let Some(handle) = handle {
             println!("Removing subscriber {}", id);
@@ -215,21 +221,20 @@ impl Processor {
             handle.shutdown.store(true, Ordering::Relaxed);
 
             // 3. Remove from generator
-            let mut generator_lock = self.generator.lock().unwrap();
+            let mut generator_lock = generator.lock().unwrap();
             generator_lock.remove_reciever(id);
             drop(generator_lock);
-
-            // 4. Wait for thread to finish
-            if let Err(e) = handle.thread_handle.join() {
-                eprintln!("Error joining subscriber {} thread: {:?}", id, e);
-            }
 
             println!("Subscriber {} removed", id);
         }
     }
 
     /// Streaming loop that receives quotes and sends via UDP.
-    fn start_streaming(info: SubscriberInfo) {
+    fn start_streaming(
+        info: SubscriberInfo,
+        generator: Arc<Mutex<QuoteGenerator>>,
+        subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
+    ) {
         // Create UDP socket for this subscriber
         let socket = match UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => s,
@@ -246,11 +251,16 @@ impl Processor {
             "Started streaming for subscriber {} to {}",
             info.id, info.udp_addr
         );
+        let socket_clone = socket.try_clone().expect("err cloning socket");
+        let shutdown_clone = info.shutdown.clone();
+
+        thread::spawn(move || Processor::monitor_connection(socket_clone, shutdown_clone));
 
         loop {
             // Check shutdown signal
             if info.shutdown.load(Ordering::Relaxed) {
                 println!("Subscriber {} received shutdown signal", info.id);
+
                 break;
             }
 
@@ -285,7 +295,65 @@ impl Processor {
                 }
             }
         }
-
+        Processor::remove_subscriber(info.id, generator, subscribers);
         println!("Streaming ended for subscriber {}", info.id);
+    }
+
+    fn monitor_connection(
+        socket: UdpSocket,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<(), ProcessorError> {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("err setting read timeout");
+        // to monitor last pings and consider dead after 15 secs
+        let mut last_ping = Instant::now();
+        let timeout = Duration::from_secs(MAX_PING_TIMEOUT);
+
+        let mut buf = [0u8; 100];
+        loop {
+            match socket.recv_from(&mut buf) {
+                Ok((_bytes_count, _src_addr)) => match UdpMessage::from_bytes(buf.to_vec()) {
+                    Ok(msg) => match msg {
+                        UdpMessage::Ping { timestamp } => {
+                            last_ping = Instant::now();
+                            match socket.send_to(
+                                // safety: should always serialize
+                                &UdpMessage::Pong { timestamp }
+                                    .to_bytes()
+                                    .expect("err serializing pong"),
+                                _src_addr,
+                            ) {
+                                Ok(_bytes_sent) => {
+                                    println!("pong sent: {}", timestamp);
+                                }
+                                Err(e) => {
+                                    eprintln!("err sending pong, {}", e);
+                                }
+                            }
+                        }
+                        _ => {
+                            println!("unexpected message")
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("err deserealizing message: {}", e)
+                    }
+                },
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::TimedOut || e.raw_os_error() == Some(35) =>
+                {
+                    if last_ping.elapsed() > timeout {
+                        println!("client appears dead, no ping for {:?}", last_ping.elapsed());
+                        shutdown.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("err recieving ping, {}", e);
+                }
+            }
+        }
+        Ok(())
     }
 }

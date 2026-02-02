@@ -1,8 +1,10 @@
 use crate::errors::WorkerError;
+use log::{error, info};
 use server::{Commands, Protocol, SubscribeCommand, UdpMessage};
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{AddrParseError, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
@@ -10,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_DATAGRAM_SIZE: usize = 65536;
 const MAX_PING_LOGS: usize = 100;
-const BASE_PING_DELAY: u64 = 5;
+const BASE_PING_DELAY: u64 = 2;
 
 pub struct PingRecord {
     timestamp: u64,
@@ -18,7 +20,7 @@ pub struct PingRecord {
 }
 
 pub struct Worker {
-    pub master_addr: String,
+    pub master_addr: Ipv4Addr,
     pub master_tcp_port: u16,
     pub worker_udp_port: u16,
 
@@ -27,19 +29,24 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(master_addr: String, master_tcp_port: u16, worker_udp_port: u16) -> Self {
-        Self {
+    pub fn new(
+        master_addr: String,
+        master_tcp_port: u16,
+        worker_udp_port: u16,
+    ) -> Result<Self, AddrParseError> {
+        let master_addr = Ipv4Addr::from_str(&master_addr)?;
+        Ok(Self {
             master_addr,
             master_tcp_port,
             worker_udp_port,
 
             shutdown: Arc::new(RwLock::new(false)),
             pings: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_PING_LOGS))),
-        }
+        })
     }
 
     pub fn start(&self, tickers: Vec<String>) -> JoinHandle<Result<(), WorkerError>> {
-        println!("Worker starting...");
+        info!("Worker starting...");
         let shutdown_clone = self.shutdown.clone();
         let worker_udp_port = self.worker_udp_port;
         let pings_clone = self.pings.clone();
@@ -50,22 +57,22 @@ impl Worker {
         loop {
             match TcpStream::connect(format!("{}:{}", self.master_addr, self.master_tcp_port)) {
                 Ok(stream) => {
-                    println!(
+                    info!(
                         "Connected to master at {}:{}",
                         self.master_addr, self.master_tcp_port
                     );
 
                     if let Err(e) = self.send_command(stream, tickers.clone()) {
-                        eprintln!("Work error: {}", e);
-                        println!("Reconnecting in 3 seconds...");
+                        error!("Work error: {}", e);
+                        info!("Reconnecting in 3 seconds...");
                         std::thread::sleep(Duration::from_secs(3));
                     } else {
-                        println!("Successfully subscribed, receiving quotes...");
+                        info!("Successfully subscribed, receiving quotes...");
                         break;
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to connect: {}. Retrying in 5 seconds...", e);
+                    error!("Failed to connect: {}. Retrying in 5 seconds...", e);
                     std::thread::sleep(Duration::from_secs(5));
                 }
             }
@@ -77,7 +84,7 @@ impl Worker {
         let cmd = SubscribeCommand {
             cmd: Commands::Stream,
             protocol: Protocol::Udp,
-            ip: Ipv4Addr::new(127, 0, 0, 1),
+            ip: self.master_addr,
             port: self.worker_udp_port,
             tickers_list: tickers,
         }

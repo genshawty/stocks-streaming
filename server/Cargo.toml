@@ -12,3 +12,5 @@ thiserror = "2"
 strum = "0.27"
 strum_macros = "0.27"
 clap = { version = "4", features = ["derive"] }
+log.workspace = true
+env_logger.workspace = true
