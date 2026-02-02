@@ -3,7 +3,7 @@ use server::{Commands, Protocol, StockQuote, SubscribeCommand};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::sync::{Arc, RwLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MAX_DATAGRAM_SIZE: usize = 65536;
@@ -13,7 +13,7 @@ pub struct Worker {
     pub master_tcp_port: u16,
     pub worker_udp_port: u16,
 
-    shutdown: Arc<RwLock<bool>>,
+    pub shutdown: Arc<RwLock<bool>>,
 }
 
 impl Worker {
@@ -27,7 +27,7 @@ impl Worker {
         }
     }
 
-    pub fn start(&self, tickers: Vec<String>) {
+    pub fn start(&self, tickers: Vec<String>) -> JoinHandle<Result<(), WorkerError>> {
         println!("Worker starting...");
         let shutdown_clone = self.shutdown.clone();
         let worker_udp_port = self.worker_udp_port;
@@ -47,7 +47,7 @@ impl Worker {
                         println!("Reconnecting in 3 seconds...");
                         std::thread::sleep(Duration::from_secs(3));
                     } else {
-                        thread::sleep(Duration::from_secs(10));
+                        println!("Successfully subscribed, receiving quotes...");
                         break;
                     }
                 }
@@ -57,7 +57,7 @@ impl Worker {
                 }
             }
         }
-        handle.join();
+        handle
     }
 
     fn send_command(&self, mut stream: TcpStream, tickers: Vec<String>) -> Result<(), WorkerError> {

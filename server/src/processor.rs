@@ -265,6 +265,7 @@ impl Processor {
                             let mut packet = Vec::with_capacity(4 + bytes.len());
                             packet.extend_from_slice(&data_len);
                             packet.extend_from_slice(&bytes);
+                            println!("sending quote");
 
                             // Send as single UDP datagram
                             if let Err(e) = socket.send_to(&packet, info.udp_addr) {

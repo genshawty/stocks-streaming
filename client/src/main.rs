@@ -4,6 +4,9 @@ mod worker;
 use clap::Parser;
 use worker::Worker;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 const MASTER_TCP_PORT: u16 = 8090;
 const WORKER_UDP_PORT: u16 = 8091;
 
@@ -36,11 +39,26 @@ fn main() {
     println!("  UDP Port: {}", args.worker_udp_port);
     println!("  Tickers: {:?}", args.tickers);
 
-    let worker = Worker::new(
-        args.master_addr,
-        args.master_tcp_port,
-        args.worker_udp_port,
-    );
+    let worker = Worker::new(args.master_addr, args.master_tcp_port, args.worker_udp_port);
 
-    worker.start(args.tickers);
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    let handle = worker.start(args.tickers);
+
+    // Wait for Ctrl+C, sleeping to avoid busy-wait
+    while running.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    println!("Shutting down...");
+    *worker.shutdown.write().unwrap() = true;
+
+    let _ = handle.join();
+    println!("Shutdown complete");
 }
