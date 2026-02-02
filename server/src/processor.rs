@@ -426,7 +426,8 @@ impl Processor {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .expect("err setting read timeout");
         // Monitor last pings and consider client dead after MAX_PING_TIMEOUT seconds
-        let mut last_ping = Instant::now();
+        let mut last_ping = None;
+        let start_time = Instant::now();
         let timeout = Duration::from_secs(MAX_PING_TIMEOUT);
 
         let mut buf = [0u8; 1000];
@@ -436,7 +437,7 @@ impl Processor {
                     match UdpMessage::from_bytes(buf[.._bytes_count].to_vec()) {
                         Ok(msg) => match msg {
                             UdpMessage::Ping { timestamp } => {
-                                last_ping = Instant::now();
+                                last_ping = Some(Instant::now());
                                 match socket.send_to(
                                     // safety: should always serialize
                                     &UdpMessage::Pong { timestamp }
@@ -464,10 +465,21 @@ impl Processor {
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::TimedOut || e.raw_os_error() == Some(35) =>
                 {
-                    if last_ping.elapsed() > timeout {
-                        info!("Client appears dead, no ping for {:?}", last_ping.elapsed());
-                        shutdown.store(true, Ordering::Relaxed);
-                        break;
+                    match last_ping {
+                        Some(lp) if lp.elapsed() > timeout => {
+                            info!("Client appears dead, no ping for {:?}", lp.elapsed());
+                            shutdown.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        None if start_time.elapsed() > 3 * timeout => {
+                            info!(
+                                "Client appears dead, no ping for {:?}",
+                                start_time.elapsed()
+                            );
+                            shutdown.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        _ => continue,
                     }
                 }
                 Err(e) => {
@@ -554,8 +566,8 @@ mod tests {
 
     #[test]
     fn test_tcp_message_round_trip_cmd() {
-        use std::net::Ipv4Addr;
         use crate::types::{Commands, Protocol, SubscribeCommand};
+        use std::net::Ipv4Addr;
 
         let (mut client, mut server) = create_tcp_pair();
 
