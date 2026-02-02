@@ -96,7 +96,7 @@ pub enum Protocol {
 /// Client subscription command containing connection details and requested tickers.
 ///
 /// Format when serialized: `COMMAND|PROTOCOL|IP|PORT|TICKER1,TICKER2,...`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SubscribeCommand {
     /// The command type
     pub cmd: Commands,
@@ -147,6 +147,44 @@ impl fmt::Display for SubscribeCommand {
             self.port,
             self.tickers_list.clone().join(",")
         )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TcpMessage {
+    Ack,
+    Cmd(SubscribeCommand),
+    Err(String),
+}
+
+impl TcpMessage {
+    pub fn to_string(&self) -> String {
+        match self {
+            TcpMessage::Ack => "ACK".to_string(),
+            TcpMessage::Cmd(cmd) => format!("CMD|{}", cmd),
+            TcpMessage::Err(e) => format!("ERR|{}", e),
+        }
+    }
+
+    pub fn from_string(s: &str) -> Result<Self, ParseCommandErr> {
+        let parts: Vec<&str> = s.splitn(2, '|').collect();
+
+        match parts[0] {
+            "ACK" => Ok(TcpMessage::Ack),
+            "CMD" => {
+                let cmd_str = parts.get(1).ok_or(ParseCommandErr::NotEnoughArguments)?;
+                let cmd = SubscribeCommand::from_str(cmd_str)?;
+                Ok(TcpMessage::Cmd(cmd))
+            }
+            "ERR" => {
+                let msg = parts
+                    .get(1)
+                    .ok_or(ParseCommandErr::NotEnoughArguments)?
+                    .to_string();
+                Ok(TcpMessage::Err(msg))
+            }
+            _ => Err(ParseCommandErr::UnknownCommand),
+        }
     }
 }
 
@@ -271,7 +309,9 @@ mod tests {
     #[test]
     fn test_udp_message_ping_pong_round_trip() {
         // Test Ping
-        let ping = UdpMessage::Ping { timestamp: 9876543210 };
+        let ping = UdpMessage::Ping {
+            timestamp: 9876543210,
+        };
         let ping_bytes = ping.to_bytes().unwrap();
         let decoded_ping = UdpMessage::from_bytes(ping_bytes).unwrap();
 
@@ -283,7 +323,9 @@ mod tests {
         }
 
         // Test Pong
-        let pong = UdpMessage::Pong { timestamp: 1111111111 };
+        let pong = UdpMessage::Pong {
+            timestamp: 1111111111,
+        };
         let pong_bytes = pong.to_bytes().unwrap();
         let decoded_pong = UdpMessage::from_bytes(pong_bytes).unwrap();
 
@@ -293,5 +335,110 @@ mod tests {
             }
             _ => panic!("Expected Pong variant"),
         }
+    }
+
+    // -- TcpMessage serialization tests --
+
+    #[test]
+    fn test_tcp_message_ack_round_trip() {
+        let msg = TcpMessage::Ack;
+        let serialized = msg.to_string();
+
+        assert_eq!(serialized, "ACK");
+
+        let deserialized = TcpMessage::from_string(&serialized).unwrap();
+        match deserialized {
+            TcpMessage::Ack => (),
+            _ => panic!("Expected Ack variant"),
+        }
+    }
+
+    #[test]
+    fn test_tcp_message_cmd_round_trip() {
+        let cmd = SubscribeCommand {
+            cmd: Commands::Stream,
+            protocol: Protocol::Udp,
+            ip: Ipv4Addr::new(192, 168, 1, 100),
+            port: 5000,
+            tickers_list: vec!["AAPL".to_string(), "GOOGL".to_string()],
+        };
+        let msg = TcpMessage::Cmd(cmd);
+
+        let serialized = msg.to_string();
+        assert_eq!(serialized, "CMD|STREAM|UDP|192.168.1.100|5000|AAPL,GOOGL");
+
+        let deserialized = TcpMessage::from_string(&serialized).unwrap();
+        match deserialized {
+            TcpMessage::Cmd(parsed_cmd) => {
+                assert_eq!(parsed_cmd.cmd, Commands::Stream);
+                assert_eq!(parsed_cmd.protocol, Protocol::Udp);
+                assert_eq!(parsed_cmd.ip, Ipv4Addr::new(192, 168, 1, 100));
+                assert_eq!(parsed_cmd.port, 5000);
+                assert_eq!(parsed_cmd.tickers_list, vec!["AAPL", "GOOGL"]);
+            }
+            _ => panic!("Expected Cmd variant"),
+        }
+    }
+
+    #[test]
+    fn test_tcp_message_err_round_trip() {
+        let error_msg = "Connection timeout";
+        let msg = TcpMessage::Err(error_msg.to_string());
+
+        let serialized = msg.to_string();
+        assert_eq!(serialized, "ERR|Connection timeout");
+
+        let deserialized = TcpMessage::from_string(&serialized).unwrap();
+        match deserialized {
+            TcpMessage::Err(e) => {
+                assert_eq!(e, "Connection timeout");
+            }
+            _ => panic!("Expected Err variant"),
+        }
+    }
+
+    #[test]
+    fn test_tcp_message_err_with_pipe_character() {
+        let error_msg = "Invalid format|expected 5 parts";
+        let msg = TcpMessage::Err(error_msg.to_string());
+
+        let serialized = msg.to_string();
+        assert_eq!(serialized, "ERR|Invalid format|expected 5 parts");
+
+        let deserialized = TcpMessage::from_string(&serialized).unwrap();
+        match deserialized {
+            TcpMessage::Err(e) => {
+                assert_eq!(e, "Invalid format|expected 5 parts");
+            }
+            _ => panic!("Expected Err variant"),
+        }
+    }
+
+    #[test]
+    fn test_tcp_message_unknown_type() {
+        let input = "UNKNOWN|some data";
+        let result = TcpMessage::from_string(input);
+        assert!(matches!(result, Err(ParseCommandErr::UnknownCommand)));
+    }
+
+    #[test]
+    fn test_tcp_message_cmd_missing_data() {
+        let input = "CMD";
+        let result = TcpMessage::from_string(input);
+        assert!(matches!(result, Err(ParseCommandErr::NotEnoughArguments)));
+    }
+
+    #[test]
+    fn test_tcp_message_err_missing_data() {
+        let input = "ERR";
+        let result = TcpMessage::from_string(input);
+        assert!(matches!(result, Err(ParseCommandErr::NotEnoughArguments)));
+    }
+
+    #[test]
+    fn test_tcp_message_cmd_invalid_command_format() {
+        let input = "CMD|INVALID|DATA";
+        let result = TcpMessage::from_string(input);
+        assert!(result.is_err());
     }
 }

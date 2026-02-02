@@ -28,6 +28,9 @@ pub enum ProcessorError {
 
     #[error("Generator error: {0}")]
     GenErr(#[from] GeneratorError),
+
+    #[error("Unexpected command")]
+    UnexpectedCommand,
 }
 
 /// Errors that can occur when parsing subscription commands.
@@ -52,4 +55,7 @@ pub enum ParseCommandErr {
     /// add documentation
     #[error("Invalid encoding")]
     Utf8Error(#[from] std::str::Utf8Error),
+
+    #[error("Unknown command")]
+    UnknownCommand,
 }

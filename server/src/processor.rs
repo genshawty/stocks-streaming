@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::errors::ProcessorError;
 use crate::generator::QuoteGenerator;
-use crate::types::{StockQuote, SubscribeCommand, UdpMessage};
+use crate::types::{StockQuote, SubscribeCommand, TcpMessage, UdpMessage};
 
 const MAX_PING_TIMEOUT: u64 = 5;
 
@@ -114,44 +114,82 @@ impl Processor {
         subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
         next_id: Arc<AtomicU64>,
     ) -> Result<(), ProcessorError> {
-        // Get client's actual IP address from TCP connection
-        loop {
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf) {
-                Ok(()) => {
-                    let msg_len = u32::from_be_bytes(len_buf) as usize;
-                    let mut data = vec![0u8; msg_len];
-                    match stream.read_exact(&mut data) {
-                        Ok(()) => {
-                            let cmd = SubscribeCommand::from_str(
-                                std::str::from_utf8(&data)
-                                    .map_err(|e| ProcessorError::ParseErr(e.into()))?,
-                            )?;
-                            Processor::add_subscriber(
-                                cmd,
-                                generator.clone(),
-                                subscribers.clone(),
-                                next_id.clone(),
-                            )?;
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Error reading data: {}. Client disconnected.", e);
-                            break;
-                        }
+        let msg = Self::read_tcp_message(&mut stream)?;
+
+        let response = match msg {
+            TcpMessage::Cmd(cmd) => {
+                match Self::add_subscriber(cmd, generator, subscribers, next_id) {
+                    Ok(_) => {
+                        info!("Subscriber added successfully, sending ACK");
+                        TcpMessage::Ack
                     }
-                }
-                Err(e) => {
-                    // Connection closed or error - break out of loop
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        error!("Client disconnected");
-                    } else {
-                        error!("Error reading header: {}", e);
+                    Err(e) => {
+                        error!("Failed to add subscriber: {}", e);
+                        TcpMessage::Err(format!("{}", e))
                     }
-                    break;
                 }
             }
-        }
+            _ => {
+                error!("Unexpected TCP message type (expected Cmd)");
+                TcpMessage::Err("Unexpected message type".to_string())
+            }
+        };
+
+        Self::send_tcp_message(&mut stream, &response)?;
+        Ok(())
+    }
+
+    fn read_tcp_message(stream: &mut TcpStream) -> Result<TcpMessage, ProcessorError> {
+        // Read 4-byte message length prefix
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                error!("Client disconnected while reading message length");
+            } else {
+                error!("Error reading message length: {}", e);
+            }
+            ProcessorError::from(e)
+        })?;
+
+        // Read message data
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        let mut data = vec![0u8; msg_len];
+        stream.read_exact(&mut data).map_err(|e| {
+            error!("Error reading message data (length: {}): {}", msg_len, e);
+            ProcessorError::from(e)
+        })?;
+
+        // Parse UTF-8 string
+        let msg_str = std::str::from_utf8(&data).map_err(|e| {
+            error!("Invalid UTF-8 in message data: {}", e);
+            ProcessorError::ParseErr(e.into())
+        })?;
+
+        // Parse TcpMessage
+        TcpMessage::from_string(msg_str).map_err(|e| {
+            error!("Failed to parse TCP message '{}': {}", msg_str, e);
+            e.into()
+        })
+    }
+
+    fn send_tcp_message(stream: &mut TcpStream, msg: &TcpMessage) -> Result<(), ProcessorError> {
+        let msg_str = msg.to_string();
+        let msg_bytes = msg_str.as_bytes();
+        let len = msg_bytes.len() as u32;
+
+        // Write 4-byte length prefix
+        stream.write_all(&len.to_be_bytes()).map_err(|e| {
+            error!("Error writing message length: {}", e);
+            ProcessorError::from(e)
+        })?;
+
+        // Write message data
+        stream.write_all(msg_bytes).map_err(|e| {
+            error!("Error writing message data: {}", e);
+            ProcessorError::from(e)
+        })?;
+
+        info!("Sent TCP message: {}", msg_str);
         Ok(())
     }
 
