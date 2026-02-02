@@ -4,6 +4,7 @@ mod worker;
 use clap::Parser;
 use worker::Worker;
 
+use env_logger::{Builder, Env};
 use log::info;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +21,7 @@ struct Args {
     master_addr: String,
 
     /// Master TCP port
-    #[arg(short = 'p', long, default_value_t = MASTER_TCP_PORT)]
+    #[arg(short = 'p', long, alias = "tcp-port", default_value_t = MASTER_TCP_PORT)]
     master_tcp_port: u16,
 
     /// Worker UDP port
@@ -37,7 +38,8 @@ struct Args {
 }
 
 fn main() {
-    env_logger::init();
+    let env = Env::new().filter_or("RUST_LOG", "info");
+    Builder::from_env(env).init();
     let args = Args::parse();
 
     let tickers = if let Some(ref path) = args.tickers_file {
@@ -72,15 +74,14 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
-    // Wait for Ctrl+C, sleeping to avoid busy-wait
-    while running.load(Ordering::SeqCst) {
+    while running.load(Ordering::SeqCst) && !*worker.shutdown.read().unwrap() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     info!("Shutting down...");
     *worker.shutdown.write().unwrap() = true;
 
-    let res = handle.join().expect("coud not join handle");
+    let res = handle.join().expect("could not join handle");
     match res {
         Ok(()) => {
             info!("Shutdown complete")

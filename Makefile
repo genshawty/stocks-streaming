@@ -1,3 +1,5 @@
+LOG_LEVEL ?= info
+
 .PHONY: all client server clean run-client run-server
 
 all: client server
@@ -8,11 +10,11 @@ client:
 server:
 	cargo build --package server
 
+run-client-file:
+	RUST_LOG=$(LOG_LEVEL) cargo run --package client -- -f server/src/data/tickers.txt
+
 run-client:
-	cargo run --package client -- -f server/src/data/tickers.txt
+	RUST_LOG=$(LOG_LEVEL) cargo run --package client -- -t AAPL
 
 run-server:
-	cargo run --package server -- -t=server/src/data/tickers.txt
-
-clean:
-	cargo clean
+	RUST_LOG=$(LOG_LEVEL) cargo run --package server -- -t=server/src/data/tickers.txt
