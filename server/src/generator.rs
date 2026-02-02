@@ -1,6 +1,8 @@
 use crate::StockQuote;
 use crate::errors::GeneratorError;
+use core::error;
 use rand::Rng;
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -12,6 +14,8 @@ use std::{
     sync::{Arc, RwLock, mpsc::Sender},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use log::{debug, error, info};
 
 /// Maximum percentage change allowed per price update (2%)
 const MAX_CHANGE_PERCENT: f64 = 0.02;
@@ -185,6 +189,7 @@ impl QuoteGenerator {
         ticker: &str,
         delay: u64,
     ) {
+        let mut dead_recv = HashSet::new();
         loop {
             let quote = Self::generate_quote(prices, ticker);
             if let Some(quote) = quote {
@@ -195,14 +200,26 @@ impl QuoteGenerator {
                         if let Some(receiver_info) = recv_guard.get(receiver_id) {
                             if receiver_info.channel.send(quote.clone()).is_err() {
                                 // Channel closed - receiver disconnected
-                                println!(
-                                    "Error sending quote to receiver {}: channel closed",
+                                error!(
+                                    "Error sending quote to receiver {}: channel closed, cleaning up",
                                     receiver_id
                                 );
+                                dead_recv.insert(receiver_id.to_owned());
                             }
                         }
                     }
                 }
+            }
+            if dead_recv.len() > 0 {
+                debug!("cleaning up {} recievers", dead_recv.len());
+                for id in dead_recv.iter() {
+                    QuoteGenerator::remove_reciever(
+                        *id,
+                        &recievers.clone(),
+                        &tickers_to_recievers.clone(),
+                    );
+                }
+                dead_recv.clear();
             }
             thread::sleep(Duration::from_millis(delay));
         }
@@ -239,10 +256,13 @@ impl QuoteGenerator {
     }
 
     /// Unsubscribes receiver from all tickers and removes from registry.
-    pub(crate) fn remove_reciever(&mut self, id: u64) {
+    pub(crate) fn remove_reciever(
+        id: u64,
+        recievers: &Arc<RwLock<HashMap<u64, RecieverInfo>>>,
+        tickers_to_recievers: &Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    ) {
         // 1. Get all tickers this receiver is subscribed to
-        let tickers: Vec<String> = self
-            .recievers
+        let tickers: Vec<String> = recievers
             .read()
             .unwrap()
             .get(&id)
@@ -250,10 +270,10 @@ impl QuoteGenerator {
             .unwrap_or_default();
 
         // 2. Remove receiver from registry
-        self.recievers.write().unwrap().remove(&id);
+        recievers.write().unwrap().remove(&id);
 
         // 3. Remove receiver ID from all ticker lists
-        let mut ticker_subs = self.tickers_to_recievers.write().unwrap();
+        let mut ticker_subs = tickers_to_recievers.write().unwrap();
         for ticker in tickers {
             if let Some(ids) = ticker_subs.get_mut(&ticker) {
                 if let Some(pos) = ids.iter().position(|&x| x == id) {
@@ -448,7 +468,7 @@ mod tests {
         let (tx2, _) = mpsc::channel();
         qg.add_reciever(1, tx1, vec!["AAPL".to_string()]);
         qg.add_reciever(2, tx2, vec!["AAPL".to_string()]);
-        qg.remove_reciever(1);
+        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
 
         // Receiver 1 should be removed
         let recvs = qg.recievers.read().unwrap();
@@ -467,7 +487,7 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
         qg.add_reciever(1, tx, vec!["AAPL".to_string()]);
-        qg.remove_reciever(999);
+        QuoteGenerator::remove_reciever(999, &qg.recievers, &qg.tickers_to_recievers);
 
         // Receiver 1 should still exist
         let recvs = qg.recievers.read().unwrap();
@@ -508,7 +528,7 @@ mod tests {
         // Add receiver with both tickers
         qg.add_reciever(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
 
-        qg.remove_reciever(1);
+        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
 
         // Receiver should be completely removed
         let recvs = qg.recievers.read().unwrap();
@@ -534,7 +554,7 @@ mod tests {
             vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()],
         );
 
-        qg.remove_reciever(1);
+        QuoteGenerator::remove_reciever(1, &qg.recievers, &qg.tickers_to_recievers);
 
         // Receiver should be completely removed
         let recvs = qg.recievers.read().unwrap();

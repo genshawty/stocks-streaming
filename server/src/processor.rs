@@ -221,9 +221,15 @@ impl Processor {
             handle.shutdown.store(true, Ordering::Relaxed);
 
             // 3. Remove from generator
-            let mut generator_lock = generator.lock().unwrap();
-            generator_lock.remove_reciever(id);
-            drop(generator_lock);
+            let (recv, tickers_to_recv) = {
+                let generator_lock = generator.lock().unwrap();
+                (
+                    generator_lock.recievers.clone(),
+                    generator_lock.tickers_to_recievers.clone(),
+                )
+            };
+
+            QuoteGenerator::remove_reciever(id, &recv, &tickers_to_recv);
 
             println!("Subscriber {} removed", id);
         }
