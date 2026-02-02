@@ -10,25 +10,34 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Maximum UDP datagram size.
 const MAX_DATAGRAM_SIZE: usize = 65536;
+/// Number of ping records kept in the ring buffer.
 const MAX_PING_LOGS: usize = 10;
+/// Interval between pings in seconds.
 const BASE_PING_DELAY: u64 = 2;
 
+/// A single ping measurement. `rtt_ms` is filled in when the matching pong arrives.
 pub struct PingRecord {
     timestamp: u64,
     rtt_ms: Option<u64>,
 }
 
+/// Client worker that subscribes to the master server via TCP
+/// and receives stock quotes over UDP.
 pub struct Worker {
     pub master_addr: Ipv4Addr,
     pub master_tcp_port: u16,
     pub worker_udp_port: u16,
 
+    /// Shared shutdown flag, set by Ctrl+C handler or when pongs stop arriving.
     pub shutdown: Arc<RwLock<bool>>,
+    /// Ring buffer of recent ping records for RTT tracking.
     pub pings: Arc<RwLock<VecDeque<PingRecord>>>,
 }
 
 impl Worker {
+    /// Creates a new worker. Parses `master_addr` as an IPv4 address.
     pub fn new(
         master_addr: String,
         master_tcp_port: u16,
@@ -45,6 +54,9 @@ impl Worker {
         })
     }
 
+    /// Spawns the UDP listener thread and sends a subscribe command to the master.
+    /// Retries TCP connection indefinitely until successful.
+    /// Returns a handle to the UDP listener thread.
     pub fn start(&self, tickers: Vec<String>) -> JoinHandle<Result<(), WorkerError>> {
         info!("Worker starting...");
         let shutdown_clone = self.shutdown.clone();
@@ -81,6 +93,7 @@ impl Worker {
         handle
     }
 
+    /// Sends a length-prefixed subscribe command over TCP.
     fn send_command(&self, mut stream: TcpStream, tickers: Vec<String>) -> Result<(), WorkerError> {
         let cmd = SubscribeCommand {
             cmd: Commands::Stream,
@@ -101,6 +114,9 @@ impl Worker {
         Ok(())
     }
 
+    /// Main UDP receive loop. Processes quotes and pongs, validates sender IP,
+    /// and spawns a ping thread on the first valid packet.
+    /// Shuts down when all pings go unanswered or shutdown flag is set.
     fn udp_listener_loop(
         pings: Arc<RwLock<VecDeque<PingRecord>>>,
         shutdown: Arc<RwLock<bool>>,
@@ -216,6 +232,7 @@ impl Worker {
         Ok(())
     }
 
+    /// Sends periodic pings to the server and records them in the shared ring buffer.
     fn start_pinging(
         socket: UdpSocket,
         src_addr: SocketAddr,
