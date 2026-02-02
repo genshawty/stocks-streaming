@@ -61,17 +61,18 @@ impl Processor {
         listener.set_nonblocking(true)?;
 
         // Clone Arc parameters without holding the mutex lock
-        let (prices, receivers, tickers_to_receivers) = {
+        let (prices, receivers, tickers_to_receivers, gen_shutdown) = {
             let generator_guard = self.generator.lock().unwrap();
             (
                 Arc::clone(&generator_guard.prices),
                 Arc::clone(&generator_guard.receivers),
                 Arc::clone(&generator_guard.tickers_to_receivers),
+                Arc::clone(&generator_guard.shutdown),
             )
         }; // Lock is released here
 
         // Start generator threads
-        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_receivers));
+        thread::spawn(|| QuoteGenerator::start(prices, receivers, tickers_to_receivers, gen_shutdown));
 
         loop {
             if *self.shutdown.read().unwrap() {
@@ -123,12 +124,12 @@ impl Processor {
                                 std::str::from_utf8(&data)
                                     .map_err(|e| ProcessorError::ParseErr(e.into()))?,
                             )?;
-                            let _ = Processor::add_subscriber(
+                            Processor::add_subscriber(
                                 cmd,
                                 generator.clone(),
                                 subscribers.clone(),
                                 next_id.clone(),
-                            );
+                            )?;
                             break;
                         }
                         Err(e) => {
@@ -157,7 +158,7 @@ impl Processor {
         generator: Arc<Mutex<QuoteGenerator>>,
         subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
         next_id: Arc<AtomicU64>,
-    ) -> u64 {
+    ) -> Result<u64, ProcessorError> {
         // 1. Generate unique ID
         let id = next_id.fetch_add(1, Ordering::Relaxed);
 
@@ -170,7 +171,7 @@ impl Processor {
         // 4. Register with generator for all tickers
         {
             let mut generator_lock = generator.lock().unwrap();
-            generator_lock.add_receiver(id, tx.clone(), cmd.tickers_list.clone());
+            generator_lock.add_receiver(id, tx.clone(), cmd.tickers_list.clone())?;
         }
 
         // 5. Create subscriber info for streaming thread
@@ -202,7 +203,7 @@ impl Processor {
             "Added subscriber {} for tickers: {:?}",
             id, cmd.tickers_list
         );
-        id
+        Ok(id)
     }
 
     /// Removes subscriber and cleans up resources.

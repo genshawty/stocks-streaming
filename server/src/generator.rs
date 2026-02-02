@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::hash::Hash;
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -76,6 +77,8 @@ pub(crate) struct QuoteGenerator {
     pub(crate) prices: Arc<RwLock<HashMap<String, PriceChange>>>,
     pub(crate) receivers: Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
     pub(crate) tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
+
+    pub(crate) shutdown: Arc<AtomicBool>,
 }
 
 impl QuoteGenerator {
@@ -101,6 +104,8 @@ impl QuoteGenerator {
             prices: Arc::new(RwLock::new(prices_hm)),
             receivers: Arc::new(RwLock::new(HashMap::new())),
             tickers_to_receivers: Arc::new(RwLock::new(tickers_recv_hm)),
+
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -122,12 +127,14 @@ impl QuoteGenerator {
         prices: Arc<RwLock<HashMap<String, PriceChange>>>,
         receivers: Arc<RwLock<HashMap<u64, ReceiverInfo>>>,
         tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
+        shutdown: Arc<AtomicBool>,
     ) {
         let tickers: Vec<_> = prices.read().unwrap().keys().cloned().collect();
         for ticker in tickers {
             let prices_clone = Arc::clone(&prices);
             let receivers_clone = Arc::clone(&receivers);
             let tickers_to_receivers_clone = Arc::clone(&tickers_to_receivers);
+            let shutdown_clone = shutdown.clone();
             thread::spawn(move || {
                 Self::start_for_quote(
                     &prices_clone,
@@ -135,6 +142,7 @@ impl QuoteGenerator {
                     &tickers_to_receivers_clone,
                     &ticker,
                     BASE_DELAY,
+                    shutdown_clone,
                 );
             });
         }
@@ -189,9 +197,14 @@ impl QuoteGenerator {
         tickers_to_receivers: &Arc<RwLock<HashMap<String, HashSet<u64>>>>,
         ticker: &str,
         delay: u64,
+        shutdown: Arc<AtomicBool>,
     ) {
         let mut dead_recv = HashSet::new();
         loop {
+            if shutdown.load(Ordering::Relaxed) {
+                debug!("Shutting down quote thread for {}", ticker);
+                break;
+            }
             let quote = Self::generate_quote(prices, ticker);
             if let Some(quote) = quote {
                 let tickers_to_recv_guard = tickers_to_receivers.read().unwrap();
@@ -228,6 +241,8 @@ impl QuoteGenerator {
 
     /// Subscribes receiver to tickers and registers its channel.
     ///
+    /// Returns `GeneratorError::TickerNotExists` if any ticker is not known to the generator.
+    ///
     /// Safety: IDs are generated via `AtomicU64::fetch_add` in `Processor::add_subscriber`,
     /// so duplicate IDs cannot occur. This function unconditionally inserts, overwriting any
     /// stale entry. If ID generation changes to allow reuse, this must be revisited.
@@ -236,7 +251,15 @@ impl QuoteGenerator {
         id: u64,
         sender: Sender<StockQuote>,
         tickers: Vec<String>,
-    ) {
+    ) -> Result<(), GeneratorError> {
+        let ticker_subs = self.tickers_to_receivers.read().unwrap();
+        for ticker in &tickers {
+            if !ticker_subs.contains_key(ticker) {
+                return Err(GeneratorError::TickerNotExists(ticker.clone()));
+            }
+        }
+        drop(ticker_subs);
+
         let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
 
         self.receivers.write().unwrap().insert(
@@ -248,7 +271,6 @@ impl QuoteGenerator {
             },
         );
 
-        // 2. Add receiver ID to each ticker's subscription list
         let mut ticker_subs = self.tickers_to_receivers.write().unwrap();
         for ticker in tickers {
             ticker_subs
@@ -256,6 +278,8 @@ impl QuoteGenerator {
                 .or_insert(HashSet::new())
                 .insert(id);
         }
+
+        Ok(())
     }
 
     /// Unsubscribes receiver from all tickers and removes from registry.
@@ -429,7 +453,7 @@ mod tests {
     fn add_receiver_creates_subscription() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _rx) = mpsc::channel();
-        qg.add_receiver(1, tx, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string()]).unwrap();
 
         // Check receiver was added
         let recvs = qg.receivers.read().unwrap();
@@ -448,8 +472,8 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]);
-        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]).unwrap();
+        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]).unwrap();
 
         // Check both receivers exist
         let recvs = qg.receivers.read().unwrap();
@@ -467,8 +491,8 @@ mod tests {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx1, _) = mpsc::channel();
         let (tx2, _) = mpsc::channel();
-        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]);
-        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx1, vec!["AAPL".to_string()]).unwrap();
+        qg.add_receiver(2, tx2, vec!["AAPL".to_string()]).unwrap();
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should be removed
@@ -487,7 +511,7 @@ mod tests {
     fn remove_receiver_nonexistent_id_does_nothing() {
         let mut qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
         let (tx, _) = mpsc::channel();
-        qg.add_receiver(1, tx, vec!["AAPL".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string()]).unwrap();
         QuoteGenerator::remove_receiver(999, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should still exist
@@ -506,7 +530,8 @@ mod tests {
         let (tx, _) = mpsc::channel();
 
         // Use add_receiver with multiple tickers
-        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()])
+            .unwrap();
 
         // Receiver should exist with both tickers
         let recvs = qg.receivers.read().unwrap();
@@ -527,7 +552,8 @@ mod tests {
         let (tx, _) = mpsc::channel();
 
         // Add receiver with both tickers
-        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()]);
+        qg.add_receiver(1, tx, vec!["AAPL".to_string(), "MSFT".to_string()])
+            .unwrap();
 
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
@@ -553,7 +579,8 @@ mod tests {
             1,
             tx,
             vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()],
-        );
+        )
+        .unwrap();
 
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
@@ -595,9 +622,10 @@ mod tests {
         let prices = Arc::clone(&qg.prices);
         let receivers = Arc::clone(&qg.receivers);
         let tickers_to_receivers = Arc::clone(&qg.tickers_to_receivers);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            // Run with a very short delay; we only need a couple of quotes
-            QuoteGenerator::start_for_quote(&prices, &receivers, &tickers_to_receivers, "AAPL", 10);
+            QuoteGenerator::start_for_quote(&prices, &receivers, &tickers_to_receivers, "AAPL", 10, shutdown_clone);
         });
 
         // Collect a few quotes then verify
@@ -607,11 +635,11 @@ mod tests {
         assert_eq!(quote2.ticker, "AAPL");
         assert!(quote1.price > 0.0);
         assert!(quote2.price > 0.0);
-        // Prices should generally differ (random walk)
         // Timestamps should be non-decreasing
         assert!(quote2.timestamp >= quote1.timestamp);
 
-        // Clean up: drop the thread (it loops forever, so we just let it go)
-        drop(handle);
+        // Signal shutdown and wait for the thread to exit
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
     }
 }
