@@ -103,7 +103,11 @@ impl QuoteGenerator {
     pub(crate) fn new_from_file(input: PathBuf) -> Result<Self, GeneratorError> {
         let file = std::fs::File::open(input)?;
         let reader = BufReader::new(file);
-        let tickers = reader.lines().map(|x| x.unwrap().trim().to_owned());
+        let tickers = reader
+            .lines()
+            .collect::<Result<Vec<_>, std::io::Error>>()?
+            .into_iter()
+            .map(|x| x.trim().to_owned());
         Ok(QuoteGenerator::new(tickers))
     }
 

@@ -4,6 +4,8 @@
 //! Clients connect via TCP to subscribe to specific stock tickers.
 
 use clap::Parser;
+use env_logger::{Builder, Env};
+use log::{error, info};
 use processor::Processor;
 use std::path::PathBuf;
 
@@ -32,25 +34,27 @@ struct Args {
 }
 
 fn main() {
+    let env = Env::new().filter_or("RUST_LOG", "info");
+    Builder::from_env(env).init();
     let args = Args::parse();
-    println!(
+    info!(
         "Starting stock quote streaming server on port {}",
         args.port
     );
-    println!("Loading tickers from: {:?}", args.tickers_file);
+    info!("Loading tickers from: {:?}", args.tickers_file);
 
     // Create and start the processor
     let processor = match Processor::new(args.port, args.tickers_file) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Failed to initialize server: {}", e);
+            error!("Failed to initialize server: {}", e);
             std::process::exit(1);
         }
     };
 
     // Start the TCP server (this blocks forever)
     if let Err(e) = processor.start_tcp_server() {
-        eprintln!("Server error: {}", e);
+        error!("Server error: {}", e);
         std::process::exit(1);
     }
 }
