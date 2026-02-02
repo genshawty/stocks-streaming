@@ -59,6 +59,24 @@ impl StockQuote {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UdpMessage {
+    Quote(StockQuote),
+    Ping { timestamp: u64 },
+    Pong { timestamp: u64 },
+}
+
+impl UdpMessage {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        Ok(bincode::serialize(&self)?)
+    }
+
+    /// Deserializes a quote from binary format using bincode.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, Box<bincode::ErrorKind>> {
+        bincode::deserialize(&bytes.as_slice())
+    }
+}
+
 /// Available commands for client requests.
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, strum_macros::Display)]
 pub enum Commands {
@@ -218,5 +236,62 @@ mod tests {
         let input = "STREAM|UDP|192.168.1.1|invalid|AAPL";
         let result = SubscribeCommand::from_str(input);
         assert!(matches!(result, Err(ParseCommandErr::InvalidPort)));
+    }
+
+    // -- UdpMessage serialization tests --
+
+    #[test]
+    fn test_udp_message_quote_round_trip() {
+        let quote = StockQuote {
+            ticker: "TSLA".to_string(),
+            price: 250.75,
+            volume: 15000,
+            timestamp: 1234567890,
+        };
+        let msg = UdpMessage::Quote(quote.clone());
+
+        // Serialize
+        let bytes = msg.to_bytes().unwrap();
+
+        // Deserialize
+        let decoded = UdpMessage::from_bytes(bytes).unwrap();
+
+        // Verify it matches
+        match decoded {
+            UdpMessage::Quote(q) => {
+                assert_eq!(q.ticker, "TSLA");
+                assert_eq!(q.price, 250.75);
+                assert_eq!(q.volume, 15000);
+                assert_eq!(q.timestamp, 1234567890);
+            }
+            _ => panic!("Expected Quote variant"),
+        }
+    }
+
+    #[test]
+    fn test_udp_message_ping_pong_round_trip() {
+        // Test Ping
+        let ping = UdpMessage::Ping { timestamp: 9876543210 };
+        let ping_bytes = ping.to_bytes().unwrap();
+        let decoded_ping = UdpMessage::from_bytes(ping_bytes).unwrap();
+
+        match decoded_ping {
+            UdpMessage::Ping { timestamp } => {
+                assert_eq!(timestamp, 9876543210);
+            }
+            _ => panic!("Expected Ping variant"),
+        }
+
+        // Test Pong
+        let pong = UdpMessage::Pong { timestamp: 1111111111 };
+        let pong_bytes = pong.to_bytes().unwrap();
+        let decoded_pong = UdpMessage::from_bytes(pong_bytes).unwrap();
+
+        match decoded_pong {
+            UdpMessage::Pong { timestamp } => {
+                assert_eq!(timestamp, 1111111111);
+            }
+            _ => panic!("Expected Pong variant"),
+        }
     }
 }

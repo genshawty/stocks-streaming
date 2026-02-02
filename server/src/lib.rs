@@ -3,4 +3,4 @@ pub mod generator;
 pub mod processor;
 pub mod types;
 
-pub use types::{Commands, Protocol, StockQuote, SubscribeCommand};
+pub use types::{Commands, Protocol, StockQuote, SubscribeCommand, UdpMessage};

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::errors::ProcessorError;
 use crate::generator::{self, QuoteGenerator};
-use crate::types::{StockQuote, SubscribeCommand};
+use crate::types::{StockQuote, SubscribeCommand, UdpMessage};
 
 /// Handle to a subscriber's streaming thread.
 struct SubscriberHandle {
@@ -257,18 +257,13 @@ impl Processor {
             // Receive quote with timeout (non-blocking)
             match info.channel.recv_timeout(Duration::from_millis(100)) {
                 Ok(quote) => {
+                    let msg = UdpMessage::Quote(quote);
                     // Serialize quote to bytes
-                    match quote.to_bytes() {
+                    match msg.to_bytes() {
                         Ok(bytes) => {
-                            // Combine header and data into single UDP packet
-                            let data_len = (bytes.len() as u32).to_be_bytes();
-                            let mut packet = Vec::with_capacity(4 + bytes.len());
-                            packet.extend_from_slice(&data_len);
-                            packet.extend_from_slice(&bytes);
                             println!("sending quote");
-
                             // Send as single UDP datagram
-                            if let Err(e) = socket.send_to(&packet, info.udp_addr) {
+                            if let Err(e) = socket.send_to(&bytes, info.udp_addr) {
                                 eprintln!("UDP send failed for subscriber {}: {}", info.id, e);
                             }
                         }
