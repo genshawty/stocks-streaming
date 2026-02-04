@@ -1,5 +1,6 @@
 use crate::StockQuote;
 use crate::errors::GeneratorError;
+use parking_lot::RwLock;
 use rand::Rng;
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     io::BufReader,
-    sync::{Arc, RwLock, mpsc::Sender},
+    sync::{Arc, mpsc::Sender},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -133,7 +134,7 @@ impl QuoteGenerator {
         tickers_to_receivers: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
         shutdown: Arc<AtomicBool>,
     ) {
-        let tickers: Vec<_> = prices.read().unwrap().keys().cloned().collect();
+        let tickers: Vec<_> = prices.read().keys().cloned().collect();
         for ticker in tickers {
             let prices_clone = Arc::clone(&prices);
             let receivers_clone = Arc::clone(&receivers);
@@ -159,7 +160,7 @@ impl QuoteGenerator {
         ticker: &str,
     ) -> Option<StockQuote> {
         let new_price = {
-            let prices = prices.read().unwrap();
+            let prices = prices.read();
             let last_data = prices.get(ticker)?;
             generate_new_price(last_data.price)
         };
@@ -171,7 +172,7 @@ impl QuoteGenerator {
             .as_millis() as u64;
 
         {
-            let mut prices_guard = prices.write().unwrap();
+            let mut prices_guard = prices.write();
             if let Some(data) = prices_guard.get_mut(ticker) {
                 data.price = new_price;
                 data.last_change = timestamp;
@@ -212,14 +213,14 @@ impl QuoteGenerator {
             let quote = Self::generate_quote(prices, ticker);
             if let Some(quote) = quote {
                 let receiver_ids: Vec<u64> = {
-                    let tickers_to_recv_guard = tickers_to_receivers.read().unwrap();
+                    let tickers_to_recv_guard = tickers_to_receivers.read();
                     tickers_to_recv_guard
                         .get(ticker)
                         .map(|x| x.iter().copied().collect())
                         .unwrap_or_default()
                 };
 
-                let recv_guard = receivers.read().unwrap();
+                let recv_guard = receivers.read();
                 for receiver_id in receiver_ids {
                     if let Some(receiver_info) = recv_guard.get(&receiver_id) {
                         if receiver_info.channel.send(quote.clone()).is_err() {
@@ -257,7 +258,7 @@ impl QuoteGenerator {
         sender: Sender<StockQuote>,
         tickers: Vec<String>,
     ) -> Result<(), GeneratorError> {
-        let ticker_subs = self.tickers_to_receivers.read().unwrap();
+        let ticker_subs = self.tickers_to_receivers.read();
         for ticker in &tickers {
             if !ticker_subs.contains_key(ticker) {
                 return Err(GeneratorError::TickerNotExists(ticker.clone()));
@@ -266,7 +267,7 @@ impl QuoteGenerator {
 
         let tickers_set: HashSet<String> = tickers.iter().cloned().collect();
 
-        self.receivers.write().unwrap().insert(
+        self.receivers.write().insert(
             id,
             ReceiverInfo {
                 channel: sender,
@@ -275,7 +276,7 @@ impl QuoteGenerator {
         );
 
         drop(ticker_subs);
-        let mut ticker_subs = self.tickers_to_receivers.write().unwrap();
+        let mut ticker_subs = self.tickers_to_receivers.write();
         for ticker in tickers {
             ticker_subs.entry(ticker).or_default().insert(id);
         }
@@ -292,16 +293,15 @@ impl QuoteGenerator {
         // 1. Get all tickers this receiver is subscribed to
         let tickers: Vec<String> = receivers
             .read()
-            .unwrap()
             .get(&id)
             .map(|info| info.subscribed_tickers.iter().cloned().collect())
             .unwrap_or_default();
 
         // 2. Remove receiver from registry
-        receivers.write().unwrap().remove(&id);
+        receivers.write().remove(&id);
 
         // 3. Remove receiver ID from all ticker sets
-        let mut ticker_subs = tickers_to_receivers.write().unwrap();
+        let mut ticker_subs = tickers_to_receivers.write();
         for ticker in tickers {
             if let Some(ids) = ticker_subs.get_mut(&ticker) {
                 ids.remove(&id);
@@ -356,7 +356,7 @@ mod tests {
     fn new_creates_entries_for_all_tickers() {
         let tickers = vec!["AAPL", "MSFT", "TSLA"];
         let qg = QuoteGenerator::new(tickers.iter().map(|s| s.to_string()));
-        let prices = qg.prices.read().unwrap();
+        let prices = qg.prices.read();
         assert_eq!(prices.len(), 3);
         for t in &tickers {
             assert!(prices.contains_key(*t));
@@ -366,14 +366,14 @@ mod tests {
     #[test]
     fn new_initializes_last_change_to_zero() {
         let qg = QuoteGenerator::new(vec!["AAPL".to_string()].into_iter());
-        let prices = qg.prices.read().unwrap();
+        let prices = qg.prices.read();
         assert_eq!(prices.get("AAPL").unwrap().last_change, 0);
     }
 
     #[test]
     fn new_with_empty_iterator() {
         let qg = QuoteGenerator::new(std::iter::empty::<String>());
-        let prices = qg.prices.read().unwrap();
+        let prices = qg.prices.read();
         assert!(prices.is_empty());
     }
 
@@ -383,7 +383,7 @@ mod tests {
     fn new_from_file_loads_tickers() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/data/tickers.txt");
         let qg = QuoteGenerator::new_from_file(path).unwrap();
-        let prices = qg.prices.read().unwrap();
+        let prices = qg.prices.read();
         assert!(prices.contains_key("AAPL"));
         assert!(prices.contains_key("MSFT"));
         assert!(prices.contains_key("TSLA"));
@@ -411,9 +411,9 @@ mod tests {
     #[test]
     fn generate_quote_updates_stored_price() {
         let qg = QuoteGenerator::new(vec!["MSFT".to_string()].into_iter());
-        let original_price = qg.prices.read().unwrap().get("MSFT").unwrap().price;
+        let _original_price = qg.prices.read().get("MSFT").unwrap().price;
         QuoteGenerator::generate_quote(&qg.prices, "MSFT");
-        let updated = qg.prices.read().unwrap();
+        let updated = qg.prices.read();
         let data = updated.get("MSFT").unwrap();
         // last_change should have been updated from 0
         assert!(data.last_change > 0);
@@ -457,13 +457,13 @@ mod tests {
         qg.add_receiver(1, tx, vec!["AAPL".to_string()]).unwrap();
 
         // Check receiver was added
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert!(recvs.contains_key(&1));
         // assert_eq!(recvs.get(&1).unwrap().id, 1);
         assert!(recvs.get(&1).unwrap().subscribed_tickers.contains("AAPL"));
 
         // Check ticker subscription list was updated
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 1);
         assert!(ticker_subs.get("AAPL").unwrap().contains(&1));
     }
@@ -477,13 +477,13 @@ mod tests {
         qg.add_receiver(2, tx2, vec!["AAPL".to_string()]).unwrap();
 
         // Check both receivers exist
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert_eq!(recvs.len(), 2);
         assert!(recvs.contains_key(&1));
         assert!(recvs.contains_key(&2));
 
         // Check ticker has both receivers
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 2);
     }
 
@@ -497,12 +497,12 @@ mod tests {
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should be removed
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert!(!recvs.contains_key(&1));
         assert!(recvs.contains_key(&2));
 
         // Ticker should only have receiver 2
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         let aapl_subs = ticker_subs.get("AAPL").unwrap();
         assert_eq!(aapl_subs.len(), 1);
         assert!(aapl_subs.contains(&2));
@@ -516,12 +516,12 @@ mod tests {
         QuoteGenerator::remove_receiver(999, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver 1 should still exist
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert!(recvs.contains_key(&1));
         assert_eq!(recvs.len(), 1);
 
         // Ticker should still have receiver 1
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert_eq!(ticker_subs.get("AAPL").unwrap().len(), 1);
     }
 
@@ -535,14 +535,14 @@ mod tests {
             .unwrap();
 
         // Receiver should exist with both tickers
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert_eq!(recvs.len(), 1);
         let recv = recvs.get(&1).unwrap();
         assert!(recv.subscribed_tickers.contains("AAPL"));
         assert!(recv.subscribed_tickers.contains("MSFT"));
 
         // Both tickers should reference this receiver
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert!(ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(ticker_subs.get("MSFT").unwrap().contains(&1));
     }
@@ -559,11 +559,11 @@ mod tests {
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver should be completely removed
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert!(!recvs.contains_key(&1));
 
         // Neither ticker should have this receiver
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert!(!ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(!ticker_subs.get("MSFT").unwrap().contains(&1));
     }
@@ -586,11 +586,11 @@ mod tests {
         QuoteGenerator::remove_receiver(1, &qg.receivers, &qg.tickers_to_receivers);
 
         // Receiver should be completely removed
-        let recvs = qg.receivers.read().unwrap();
+        let recvs = qg.receivers.read();
         assert!(!recvs.contains_key(&1));
 
         // All tickers should not have this receiver
-        let ticker_subs = qg.tickers_to_receivers.read().unwrap();
+        let ticker_subs = qg.tickers_to_receivers.read();
         assert!(!ticker_subs.get("AAPL").unwrap().contains(&1));
         assert!(!ticker_subs.get("MSFT").unwrap().contains(&1));
         assert!(!ticker_subs.get("TSLA").unwrap().contains(&1));
@@ -605,7 +605,7 @@ mod tests {
 
         // Manually insert receiver using new structure
         {
-            let mut recvs = qg.receivers.write().unwrap();
+            let mut recvs = qg.receivers.write();
             recvs.insert(
                 1,
                 ReceiverInfo {
@@ -615,7 +615,7 @@ mod tests {
             );
         }
         {
-            let mut ticker_subs = qg.tickers_to_receivers.write().unwrap();
+            let mut ticker_subs = qg.tickers_to_receivers.write();
             ticker_subs.insert("AAPL".to_string(), HashSet::from([1]));
         }
 

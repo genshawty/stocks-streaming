@@ -10,3 +10,4 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3.5.1"
 log.workspace = true
 env_logger.workspace = true
+parking_lot.workspace = true

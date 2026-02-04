@@ -1,18 +1,19 @@
 use crate::errors::WorkerError;
 use log::{error, info};
+use parking_lot::RwLock;
 use server::{
     Commands, Protocol, SubscribeCommand, TcpMessage, UdpMessage, errors::ParseCommandErr,
 };
-use std::collections::VecDeque;
-use std::io::{Read, Write};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
-use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
 use std::thread;
-use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+    str::FromStr,
+    sync::{Arc, atomic::AtomicBool, atomic::Ordering},
+    thread::JoinHandle,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Maximum UDP datagram size.
 const MAX_DATAGRAM_SIZE: usize = 65536;
@@ -252,7 +253,7 @@ impl Worker {
                                     as u64;
 
                                 // matching pong with already sent ping
-                                let mut pings_guard = pings.write().unwrap();
+                                let mut pings_guard = pings.write();
                                 if let Some(pos) =
                                     pings_guard.iter().position(|x| x.timestamp == timestamp)
                                 {
@@ -274,12 +275,7 @@ impl Worker {
                         || e.kind() == std::io::ErrorKind::WouldBlock
                         || e.raw_os_error() == Some(35) =>
                 {
-                    let n_count = pings
-                        .read()
-                        .unwrap()
-                        .iter()
-                        .filter(|x| x.rtt_ms.is_none())
-                        .count();
+                    let n_count = pings.read().iter().filter(|x| x.rtt_ms.is_none()).count();
                     if n_count >= MAX_PING_LOGS {
                         error!(
                             "no pongs recieved during: {}, shutting down",
@@ -334,7 +330,7 @@ impl Worker {
                 Ok(_bytes_sent) => {
                     log::debug!("sent ping {timestamp}");
 
-                    let mut pings_guard = pings.write().unwrap();
+                    let mut pings_guard = pings.write();
                     if pings_guard.len() >= MAX_PING_LOGS {
                         pings_guard.pop_front();
                     }

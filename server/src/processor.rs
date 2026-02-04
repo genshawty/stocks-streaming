@@ -1,10 +1,11 @@
 use log::{debug, error, info, warn};
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -85,7 +86,7 @@ impl Processor {
 
         // Clone Arc parameters without holding the mutex lock
         let (prices, receivers, tickers_to_receivers, gen_shutdown) = {
-            let generator_guard = self.generator.lock().unwrap();
+            let generator_guard = self.generator.lock();
             (
                 Arc::clone(&generator_guard.prices),
                 Arc::clone(&generator_guard.receivers),
@@ -260,7 +261,7 @@ impl Processor {
         let (tx, rx) = mpsc::channel();
 
         {
-            let mut generator_lock = generator.lock().unwrap();
+            let mut generator_lock = generator.lock();
             generator_lock.add_receiver(id, tx, cmd.tickers_list.clone())?;
         }
 
@@ -273,7 +274,7 @@ impl Processor {
         };
         let subscribers_clone = subscribers.clone();
 
-        subscribers.write().unwrap().insert(
+        subscribers.write().insert(
             id,
             SubscriberHandle {
                 shutdown: Arc::clone(&shutdown),
@@ -308,7 +309,7 @@ impl Processor {
         subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
     ) {
         // 1. Remove from subscribers map
-        let handle = subscribers.write().unwrap().remove(&id);
+        let handle = subscribers.write().remove(&id);
 
         if let Some(handle) = handle {
             info!("Removing subscriber {}", id);
@@ -318,7 +319,7 @@ impl Processor {
 
             // 3. Remove from generator
             let (recv, tickers_to_recv) = {
-                let generator_lock = generator.lock().unwrap();
+                let generator_lock = generator.lock();
                 (
                     generator_lock.receivers.clone(),
                     generator_lock.tickers_to_receivers.clone(),
