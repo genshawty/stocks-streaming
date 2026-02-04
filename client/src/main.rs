@@ -82,12 +82,12 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
-    while running.load(Ordering::SeqCst) && !*worker.shutdown.read().unwrap() {
+    while running.load(Ordering::SeqCst) && !worker.shutdown.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     info!("Shutting down...");
-    *worker.shutdown.write().unwrap() = true;
+    worker.shutdown.store(true, Ordering::Relaxed);
 
     let res = handle.join().expect("could not join handle");
     match res {

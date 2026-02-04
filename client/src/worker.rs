@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
@@ -37,7 +39,7 @@ pub struct Worker {
     /// UDP port for receiving quotes.
     pub worker_udp_port: u16,
     /// Shared shutdown flag, set by Ctrl+C handler or when pongs stop arriving.
-    pub shutdown: Arc<RwLock<bool>>,
+    pub shutdown: Arc<AtomicBool>,
     /// Ring buffer of recent ping records for RTT tracking.
     pub pings: Arc<RwLock<VecDeque<PingRecord>>>,
 }
@@ -55,7 +57,7 @@ impl Worker {
             master_tcp_port,
             worker_udp_port,
 
-            shutdown: Arc::new(RwLock::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
             pings: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_PING_LOGS))),
         })
     }
@@ -190,7 +192,7 @@ impl Worker {
     /// Shuts down when all pings go unanswered or shutdown flag is set.
     fn udp_listener_loop(
         pings: Arc<RwLock<VecDeque<PingRecord>>>,
-        shutdown: Arc<RwLock<bool>>,
+        shutdown: Arc<AtomicBool>,
         master_addr: Ipv4Addr,
         worker_udp_port: u16,
     ) -> Result<(), WorkerError> {
@@ -204,7 +206,7 @@ impl Worker {
         let mut ping_handle: Option<JoinHandle<Result<(), WorkerError>>> = None;
 
         loop {
-            if *shutdown.read().unwrap() {
+            if shutdown.load(Ordering::Relaxed) {
                 info!("UDP listener shutting down");
                 break;
             }
@@ -283,7 +285,7 @@ impl Worker {
                             "no pongs recieved during: {}, shutting down",
                             (MAX_PING_LOGS as u64) * BASE_PING_DELAY
                         );
-                        *shutdown.write().unwrap() = true;
+                        shutdown.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
@@ -310,10 +312,10 @@ impl Worker {
         socket: UdpSocket,
         src_addr: SocketAddr,
         pings: Arc<RwLock<VecDeque<PingRecord>>>,
-        shutdown: Arc<RwLock<bool>>,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<(), WorkerError> {
         loop {
-            if *shutdown.read().unwrap() {
+            if shutdown.load(Ordering::Relaxed) {
                 info!("Shutting down pings");
                 break;
             }

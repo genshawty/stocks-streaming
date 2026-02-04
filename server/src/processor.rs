@@ -51,7 +51,7 @@ pub(crate) struct Processor {
     /// Atomic counter for generating unique subscriber IDs.
     next_id: Arc<AtomicU64>,
     /// Global shutdown flag for the TCP server.
-    shutdown: Arc<RwLock<bool>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Processor {
@@ -65,7 +65,7 @@ impl Processor {
             generator: Arc::new(Mutex::new(generator)),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(0)),
-            shutdown: Arc::new(RwLock::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -100,7 +100,7 @@ impl Processor {
         });
 
         loop {
-            if *self.shutdown.read().unwrap() {
+            if self.shutdown.load(Ordering::Relaxed) {
                 info!("TCP server shutting down");
                 break;
             }
