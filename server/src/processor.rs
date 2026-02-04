@@ -1,7 +1,7 @@
 use log::{debug, error, info, warn};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::errors::{ParseCommandErr, ProcessorError};
+use crate::errors::ProcessorError;
 use crate::generator::QuoteGenerator;
 use crate::types::{StockQuote, SubscribeCommand, TcpMessage, UdpMessage};
 use crate::utils::read_tcp_message;

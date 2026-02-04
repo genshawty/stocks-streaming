@@ -2,14 +2,13 @@ use crate::errors::WorkerError;
 use log::{error, info};
 use parking_lot::RwLock;
 use server::{
-    Commands, Protocol, SubscribeCommand, TcpMessage, UdpMessage, errors::ParseCommandErr,
-    utils::read_tcp_message,
+    Commands, Protocol, SubscribeCommand, TcpMessage, UdpMessage, utils::read_tcp_message,
 };
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::thread;
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
+    io::Write,
     str::FromStr,
     sync::{Arc, atomic::AtomicBool, atomic::Ordering},
     thread::JoinHandle,
