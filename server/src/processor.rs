@@ -360,9 +360,10 @@ impl Processor {
         );
         let socket_clone = socket.try_clone().expect("err cloning socket");
         let shutdown_clone = info.shutdown.clone();
+        let id = info.id;
 
         let monitor_handle =
-            thread::spawn(move || Processor::monitor_connection(socket_clone, shutdown_clone));
+            thread::spawn(move || Processor::monitor_connection(id, socket_clone, shutdown_clone));
 
         loop {
             // Check shutdown signal
@@ -419,6 +420,7 @@ impl Processor {
     /// If no ping is received within MAX_PING_TIMEOUT seconds, signals shutdown.
     /// This runs in a separate thread spawned by start_streaming.
     fn monitor_connection(
+        id: u64,
         socket: UdpSocket,
         shutdown: Arc<AtomicBool>,
     ) -> Result<(), ProcessorError> {
@@ -463,17 +465,24 @@ impl Processor {
                     }
                 }
                 Err(ref e)
-                    if e.kind() == std::io::ErrorKind::TimedOut || e.raw_os_error() == Some(35) =>
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.raw_os_error() == Some(35) =>
                 {
                     match last_ping {
                         Some(lp) if lp.elapsed() > timeout => {
-                            info!("Client appears dead, no ping for {:?}", lp.elapsed());
+                            info!(
+                                "[{}] Client appears dead, no ping for {:?}",
+                                id,
+                                lp.elapsed()
+                            );
                             shutdown.store(true, Ordering::Relaxed);
                             break;
                         }
                         None if start_time.elapsed() > 3 * timeout => {
                             info!(
-                                "Client appears dead, no ping for {:?}",
+                                "[{}] Client appears dead, no ping for {:?}",
+                                id,
                                 start_time.elapsed()
                             );
                             shutdown.store(true, Ordering::Relaxed);

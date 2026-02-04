@@ -268,7 +268,9 @@ impl Worker {
                     }
                 },
                 Err(ref e)
-                    if e.kind() == std::io::ErrorKind::TimedOut || e.raw_os_error() == Some(35) =>
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.raw_os_error() == Some(35) =>
                 {
                     let n_count = pings
                         .read()
