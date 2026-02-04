@@ -3,6 +3,7 @@ use log::{error, info};
 use parking_lot::RwLock;
 use server::{
     Commands, Protocol, SubscribeCommand, TcpMessage, UdpMessage, errors::ParseCommandErr,
+    utils::read_tcp_message,
 };
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::thread;
@@ -84,8 +85,7 @@ impl Worker {
                         self.master_addr, self.master_tcp_port
                     );
                     let mut stream_clone = stream.try_clone().expect("failed to clone stream");
-                    let read_handle =
-                        thread::spawn(move || Worker::read_tcp_message(&mut stream_clone));
+                    let read_handle = thread::spawn(move || read_tcp_message(&mut stream_clone));
 
                     if let Err(e) = self.send_command(stream, tickers.clone()) {
                         error!("Work error: {}", e);
@@ -129,42 +129,6 @@ impl Worker {
             }
         }
         handle
-    }
-
-    fn read_tcp_message(stream: &mut TcpStream) -> Result<TcpMessage, WorkerError> {
-        // Read 4-byte message length prefix
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                error!("Server disconnected while reading message length");
-            } else {
-                error!("Error reading message length: {}", e);
-            }
-            WorkerError::from(e)
-        })?;
-
-        // Read message data
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len > 1e7 as usize {
-            return Err(ParseCommandErr::MsgToBig.into());
-        }
-        let mut data = vec![0u8; msg_len];
-        stream.read_exact(&mut data).map_err(|e| {
-            error!("Error reading message data (length: {}): {}", msg_len, e);
-            WorkerError::from(e)
-        })?;
-
-        // Parse UTF-8 string
-        let msg_str = std::str::from_utf8(&data).map_err(|e| {
-            error!("Invalid UTF-8 in message data: {}", e);
-            WorkerError::ParseErr(e.into())
-        })?;
-
-        // Parse TcpMessage
-        TcpMessage::from_string(msg_str).map_err(|e| {
-            error!("Failed to parse TCP message '{}': {}", msg_str, e);
-            e.into()
-        })
     }
 
     /// Sends a length-prefixed subscribe command over TCP.

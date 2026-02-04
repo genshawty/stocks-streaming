@@ -1,4 +1,4 @@
-use server::errors::ParseCommandErr;
+pub use server::errors::ParseCommandErr;
 use std::io;
 use thiserror::Error;
 

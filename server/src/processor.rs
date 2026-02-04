@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::errors::{ParseCommandErr, ProcessorError};
 use crate::generator::QuoteGenerator;
 use crate::types::{StockQuote, SubscribeCommand, TcpMessage, UdpMessage};
+use crate::utils::read_tcp_message;
 
 /// Maximum time (in seconds) without receiving a ping before considering client dead.
 const MAX_PING_TIMEOUT: u64 = 5;
@@ -141,7 +142,7 @@ impl Processor {
         subscribers: Arc<RwLock<HashMap<u64, SubscriberHandle>>>,
         next_id: Arc<AtomicU64>,
     ) -> Result<(), ProcessorError> {
-        let msg = Self::read_tcp_message(&mut stream)?;
+        let msg = read_tcp_message(&mut stream)?;
 
         let response = match msg {
             TcpMessage::Cmd(cmd) => {
@@ -164,51 +165,6 @@ impl Processor {
 
         Self::send_tcp_message(&mut stream, &response)?;
         Ok(())
-    }
-
-    /// Reads a length-prefixed TCP message from the stream.
-    ///
-    /// Protocol: [4-byte length (big-endian)][message data (UTF-8 string)]
-    ///
-    /// Returns an error if:
-    /// - Connection is closed unexpectedly
-    /// - Message length exceeds 10MB (DoS protection)
-    /// - Message data is not valid UTF-8
-    /// - Message cannot be parsed as TcpMessage
-    fn read_tcp_message(stream: &mut TcpStream) -> Result<TcpMessage, ProcessorError> {
-        // Read 4-byte message length prefix
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                error!("Client disconnected while reading message length");
-            } else {
-                error!("Error reading message length: {}", e);
-            }
-            ProcessorError::from(e)
-        })?;
-
-        // Read message data
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len > 1e7 as usize {
-            return Err(ParseCommandErr::MsgToBig.into());
-        }
-        let mut data = vec![0u8; msg_len];
-        stream.read_exact(&mut data).map_err(|e| {
-            error!("Error reading message data (length: {}): {}", msg_len, e);
-            ProcessorError::from(e)
-        })?;
-
-        // Parse UTF-8 string
-        let msg_str = std::str::from_utf8(&data).map_err(|e| {
-            error!("Invalid UTF-8 in message data: {}", e);
-            ProcessorError::ParseErr(e.into())
-        })?;
-
-        // Parse TcpMessage
-        TcpMessage::from_string(msg_str).map_err(|e| {
-            error!("Failed to parse TCP message '{}': {}", msg_str, e);
-            e.into()
-        })
     }
 
     /// Sends a length-prefixed TCP message to the stream.
@@ -529,7 +485,7 @@ mod tests {
         Processor::send_tcp_message(&mut server, &ack_msg).unwrap();
 
         // Read ACK on client side
-        let received = Processor::read_tcp_message(&mut client).unwrap();
+        let received = read_tcp_message(&mut client).unwrap();
         assert!(matches!(received, TcpMessage::Ack));
     }
 
@@ -542,7 +498,7 @@ mod tests {
         Processor::send_tcp_message(&mut server, &err_msg).unwrap();
 
         // Read ERR on client side
-        let received = Processor::read_tcp_message(&mut client).unwrap();
+        let received = read_tcp_message(&mut client).unwrap();
         match received {
             TcpMessage::Err(msg) => assert_eq!(msg, "Test error message"),
             _ => panic!("Expected Err variant"),
@@ -559,7 +515,7 @@ mod tests {
         server.flush().unwrap();
 
         // Reading should fail with MsgTooBig error
-        let result = Processor::read_tcp_message(&mut client);
+        let result = read_tcp_message(&mut client);
         assert!(result.is_err());
     }
 
@@ -570,7 +526,7 @@ mod tests {
         drop(_server);
 
         // Reading should fail with connection closed error
-        let result = Processor::read_tcp_message(&mut client);
+        let result = read_tcp_message(&mut client);
         assert!(result.is_err());
     }
 
@@ -595,7 +551,7 @@ mod tests {
         Processor::send_tcp_message(&mut client, &cmd_msg).unwrap();
 
         // Read on server side
-        let received = Processor::read_tcp_message(&mut server).unwrap();
+        let received = read_tcp_message(&mut server).unwrap();
         match received {
             TcpMessage::Cmd(received_cmd) => {
                 assert_eq!(received_cmd.cmd, Commands::Stream);
@@ -615,14 +571,14 @@ mod tests {
         // Send valid small message
         let small_msg = TcpMessage::Ack;
         Processor::send_tcp_message(&mut server, &small_msg).unwrap();
-        let received = Processor::read_tcp_message(&mut client).unwrap();
+        let received = read_tcp_message(&mut client).unwrap();
         assert!(matches!(received, TcpMessage::Ack));
 
         // Send message near the limit (should succeed)
         let large_err = "x".repeat(1_000_000); // 1MB
         let large_msg = TcpMessage::Err(large_err.clone());
         Processor::send_tcp_message(&mut server, &large_msg).unwrap();
-        let received = Processor::read_tcp_message(&mut client).unwrap();
+        let received = read_tcp_message(&mut client).unwrap();
         match received {
             TcpMessage::Err(msg) => assert_eq!(msg.len(), 1_000_000),
             _ => panic!("Expected Err variant"),

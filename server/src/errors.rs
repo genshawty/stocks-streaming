@@ -67,4 +67,10 @@ pub enum ParseCommandErr {
     /// Command type is not recognized.
     #[error("Unknown command")]
     UnknownCommand,
+
+    /// An I/O error occurred while reading the file.
+    ///
+    /// Wraps the underlying [`std::io::Error`].
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
 }

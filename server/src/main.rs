@@ -18,6 +18,7 @@ pub mod generator;
 pub mod processor;
 /// Data types for quotes, commands, and messages.
 pub mod types;
+pub mod utils;
 
 pub use types::StockQuote;
 

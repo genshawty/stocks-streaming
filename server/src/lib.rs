@@ -6,5 +6,6 @@ pub mod errors;
 // pub mod generator;
 // pub mod processor;
 pub mod types;
+pub mod utils;
 
 pub use types::{Commands, Protocol, StockQuote, SubscribeCommand, TcpMessage, UdpMessage};
